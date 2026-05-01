@@ -1,0 +1,27 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+android-app/build/
+android-app/.dart_tool/
+android-app/android/.gradle/
+android-app/android/app/build/
+
+# Android local
+android-app/android/local.properties
+
+# Node
+node_modules/
+backend-render/node_modules/
+
+# Env
+.env
+backend-render/.env
+
+# IDE
+.idea/
+.vscode/
