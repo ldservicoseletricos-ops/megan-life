@@ -12,11 +12,25 @@ const { createWorker } = require('tesseract.js');
 const { PDFDocument, StandardFonts } = require('pdf-lib');
 const { GoogleGenAI } = require('@google/genai');
 const { createClient } = require('@supabase/supabase-js');
+const textToSpeech = require('@google-cloud/text-to-speech');
 
 const app = express();
 const port = Number(process.env.PORT || 10000);
 const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
+
+let ttsClient = null;
+
+try {
+  if (process.env.GOOGLE_CLOUD_TTS_CREDENTIALS_JSON) {
+    const credentials = JSON.parse(process.env.GOOGLE_CLOUD_TTS_CREDENTIALS_JSON);
+    ttsClient = new textToSpeech.TextToSpeechClient({ credentials });
+  } else {
+    ttsClient = new textToSpeech.TextToSpeechClient();
+  }
+} catch (e) {
+  console.error('Erro ao iniciar Google Cloud TTS:', e.message);
+}
 
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
@@ -63,6 +77,27 @@ function cleanFactValue(value) {
     .replace(/[.。!！?？]+$/g, '')
     .replace(/^['"“”‘’]+|['"“”‘’]+$/g, '')
     .trim();
+}
+
+function escapeSsml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildHumanSsml(text) {
+  const clean = sanitizeText(text, 4500)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const escaped = escapeSsml(clean)
+    .replace(/([.!?])\s+/g, '$1<break time="280ms"/> ')
+    .replace(/,\s+/g, ',<break time="120ms"/> ');
+
+  return `<speak><prosody rate="96%" pitch="+0st">${escaped}</prosody></speak>`;
 }
 
 async function getUserMemory(userId, limit = 120) {
@@ -282,11 +317,83 @@ async function readFileText(file) {
 }
 
 app.get('/', (_req, res) => {
-  res.json({ ok: true, app: 'Megan Life', version: '4.2.3', status: 'online', memory: supabase ? 'supabase' : 'json-fallback' });
+  res.json({
+    ok: true,
+    app: 'Megan Life',
+    version: '4.2.3',
+    status: 'online',
+    memory: supabase ? 'supabase' : 'json-fallback',
+    tts: Boolean(ttsClient)
+  });
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, app: 'Megan Life', version: '4.2.3', gemini: Boolean(ai), memory: supabase ? 'supabase' : 'json-fallback' });
+  res.json({
+    ok: true,
+    app: 'Megan Life',
+    version: '4.2.3',
+    gemini: Boolean(ai),
+    memory: supabase ? 'supabase' : 'json-fallback',
+    tts: Boolean(ttsClient)
+  });
+});
+
+app.post('/api/tts', async (req, res) => {
+  try {
+    if (!ttsClient) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Google Cloud TTS não configurado no backend.'
+      });
+    }
+
+    const text = sanitizeText(req.body?.text || '', 4500);
+
+    if (!text) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Texto vazio.'
+      });
+    }
+
+    const useSsml = req.body?.ssml !== false;
+    const request = {
+      input: useSsml ? { ssml: buildHumanSsml(text) } : { text },
+      voice: {
+        languageCode: process.env.GOOGLE_CLOUD_TTS_LANGUAGE || 'pt-BR',
+        name: process.env.GOOGLE_CLOUD_TTS_VOICE || 'pt-BR-Neural2-A',
+        ssmlGender: process.env.GOOGLE_CLOUD_TTS_GENDER || 'FEMALE',
+      },
+      audioConfig: {
+        audioEncoding: 'MP3',
+        speakingRate: Number(process.env.GOOGLE_CLOUD_TTS_RATE || 0.96),
+        pitch: Number(process.env.GOOGLE_CLOUD_TTS_PITCH || 1.0),
+        volumeGainDb: Number(process.env.GOOGLE_CLOUD_TTS_VOLUME_GAIN_DB || 0.0),
+      },
+    };
+
+    const [response] = await ttsClient.synthesizeSpeech(request);
+
+    if (!response.audioContent) {
+      return res.status(500).json({
+        ok: false,
+        error: 'Google Cloud TTS não retornou áudio.'
+      });
+    }
+
+    return res.json({
+      ok: true,
+      audio: Buffer.from(response.audioContent).toString('base64'),
+      mimeType: 'audio/mpeg',
+      encoding: 'base64'
+    });
+  } catch (e) {
+    console.error('Erro no /api/tts:', e);
+    return res.status(500).json({
+      ok: false,
+      error: e.message || 'Erro ao gerar áudio.'
+    });
+  }
 });
 
 app.post('/api/chat', async (req, res) => {

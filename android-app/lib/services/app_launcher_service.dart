@@ -1,62 +1,398 @@
 import 'dart:io';
+
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class AppLauncherService {
+  static const MethodChannel _platform = MethodChannel('megan.apps');
+
+  List<Map<String, dynamic>> _installedApps = [];
+
   final Map<String, String> knownPackages = const {
     'whatsapp': 'com.whatsapp',
+    'zap': 'com.whatsapp',
+    'wpp': 'com.whatsapp',
+    'telegram': 'org.telegram.messenger',
     'waze': 'com.waze',
     'maps': 'com.google.android.apps.maps',
     'google maps': 'com.google.android.apps.maps',
+    'mapa': 'com.google.android.apps.maps',
     'gmail': 'com.google.android.gm',
     'youtube': 'com.google.android.youtube',
+    'yt': 'com.google.android.youtube',
     'instagram': 'com.instagram.android',
+    'insta': 'com.instagram.android',
     'facebook': 'com.facebook.katana',
+    'face': 'com.facebook.katana',
     'chrome': 'com.android.chrome',
+    'navegador': 'com.android.chrome',
     'spotify': 'com.spotify.music',
+    'uber': 'com.ubercab',
+    '99': 'com.taxis99',
+    'netflix': 'com.netflix.mediaclient',
+    'nubank': 'com.nu.production',
+    'nu bank': 'com.nu.production',
+    'nubanco': 'com.nu.production',
+    'nu': 'com.nu.production',
+    'tiktok': 'com.zhiliaoapp.musically',
+    'tik tok': 'com.zhiliaoapp.musically',
+    'tk tok': 'com.zhiliaoapp.musically',
+    'configuracoes': 'com.android.settings',
+    'configurações': 'com.android.settings',
+    'settings': 'com.android.settings',
+    'camera': 'com.android.camera',
+    'câmera': 'com.android.camera',
   };
 
   final Map<String, String> knownSchemes = const {
     'whatsapp': 'whatsapp://send',
+    'zap': 'whatsapp://send',
+    'wpp': 'whatsapp://send',
+    'telegram': 'tg://',
     'waze': 'waze://',
     'maps': 'geo:0,0',
     'google maps': 'geo:0,0',
-    'gmail': 'googlegmail://',
+    'mapa': 'geo:0,0',
     'youtube': 'youtube://',
+    'yt': 'youtube://',
     'instagram': 'instagram://app',
+    'insta': 'instagram://app',
     'facebook': 'fb://',
-    'chrome': 'googlechrome://',
     'spotify': 'spotify://',
   };
 
-  Future<bool> openKnownApp(String name) async {
-    final key = name.toLowerCase().trim();
-    final pkg = knownPackages[key];
-    final scheme = knownSchemes[key];
-
-    if (pkg == null && scheme == null) return false;
+  Future<void> loadApps() async {
+    if (!Platform.isAndroid) return;
 
     try {
-      if (scheme != null) {
-        final openedByScheme = await _tryLaunch(Uri.parse(scheme));
-        if (openedByScheme) return true;
+      final apps = await _platform.invokeMethod('getInstalledApps');
+
+      if (apps is List) {
+        _installedApps = apps
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList();
+      }
+    } catch (_) {
+      _installedApps = [];
+    }
+  }
+
+  String _normalize(String text) {
+    return text
+        .toLowerCase()
+        .replaceAll('á', 'a')
+        .replaceAll('à', 'a')
+        .replaceAll('ã', 'a')
+        .replaceAll('â', 'a')
+        .replaceAll('é', 'e')
+        .replaceAll('ê', 'e')
+        .replaceAll('í', 'i')
+        .replaceAll('ó', 'o')
+        .replaceAll('õ', 'o')
+        .replaceAll('ô', 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('ç', 'c')
+        .replaceAll(RegExp(r'\b(abrir|abre|abrindo|iniciar|inicia|rodar|executar|executa)\b'), '')
+        .replaceAll(RegExp(r'\b(o|a|app|aplicativo|programa)\b'), '')
+        .replaceAll(RegExp(r'[^\w\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _compact(String text) {
+    return _normalize(text).replaceAll(' ', '');
+  }
+
+  String _fixSpeechAppName(String text) {
+    final normalized = _normalize(text);
+    final compact = _compact(text);
+
+    if (compact.contains('nubank') ||
+        compact.contains('nubak') ||
+        compact.contains('nubanc') ||
+        compact.contains('nubanco') ||
+        compact.contains('nubamk') ||
+        compact.contains('nubamc') ||
+        compact.contains('nubk') ||
+        compact.contains('nubak') ||
+        compact.contains('nuba') ||
+        compact.contains('nub')) {
+      return 'nubank';
+    }
+
+    if (compact.contains('tiktok') ||
+        compact.contains('tictok') ||
+        compact.contains('tiktok') ||
+        compact.contains('tktok') ||
+        compact.contains('tiktok') ||
+        normalized.contains('tk tok') ||
+        normalized.contains('tik tok') ||
+        normalized.contains('tic tok')) {
+      return 'tiktok';
+    }
+
+    if (compact.contains('youtube') ||
+        compact.contains('yutube') ||
+        compact.contains('iutube') ||
+        compact.contains('yt')) {
+      return 'youtube';
+    }
+
+    if (compact.contains('whatsapp') ||
+        compact.contains('wattsapp') ||
+        compact.contains('whats') ||
+        compact.contains('zap') ||
+        compact.contains('wpp')) {
+      return 'whatsapp';
+    }
+
+    if (compact.contains('instagram') ||
+        compact.contains('instagran') ||
+        compact.contains('insta')) {
+      return 'instagram';
+    }
+
+    if (compact.contains('telegram')) {
+      return 'telegram';
+    }
+
+    if (compact.contains('spotify')) {
+      return 'spotify';
+    }
+
+    return normalized;
+  }
+
+  int _levenshtein(String s, String t) {
+    if (s == t) return 0;
+    if (s.isEmpty) return t.length;
+    if (t.isEmpty) return s.length;
+
+    final v0 = List<int>.generate(t.length + 1, (i) => i);
+    final v1 = List<int>.filled(t.length + 1, 0);
+
+    for (int i = 0; i < s.length; i++) {
+      v1[0] = i + 1;
+
+      for (int j = 0; j < t.length; j++) {
+        final cost = s[i] == t[j] ? 0 : 1;
+        v1[j + 1] = [
+          v1[j] + 1,
+          v0[j + 1] + 1,
+          v0[j] + cost,
+        ].reduce((a, b) => a < b ? a : b);
       }
 
-      if (Platform.isAndroid && pkg != null) {
-        final intentUri = Uri.parse('intent://#Intent;package=$pkg;end');
-        final openedByIntent = await _tryLaunch(intentUri);
-        if (openedByIntent) return true;
+      for (int j = 0; j < v0.length; j++) {
+        v0[j] = v1[j];
+      }
+    }
 
-        final marketUri = Uri.parse('market://details?id=$pkg');
-        final openedMarket = await _tryLaunch(marketUri);
-        if (openedMarket) return true;
+    return v1[t.length];
+  }
 
-        final playStoreUri = Uri.parse(
-          'https://play.google.com/store/apps/details?id=$pkg',
-        );
-        return await _tryLaunch(playStoreUri);
+  String? _detectKnownApp(String text) {
+    final normalized = _fixSpeechAppName(text);
+    final compact = normalized.replaceAll(' ', '');
+
+    if (knownPackages.containsKey(normalized)) {
+      return normalized;
+    }
+
+    for (final key in knownPackages.keys) {
+      final normalizedKey = _normalize(key);
+      final compactKey = normalizedKey.replaceAll(' ', '');
+
+      if (normalized == normalizedKey ||
+          compact == compactKey ||
+          normalized.contains(normalizedKey) ||
+          normalizedKey.contains(normalized) ||
+          compact.contains(compactKey) ||
+          compactKey.contains(compact)) {
+        return key;
+      }
+
+      final distance = _levenshtein(compact, compactKey);
+      final allowedDistance = compact.length <= 5 ? 2 : 3;
+
+      if (distance <= allowedDistance) {
+        return key;
+      }
+    }
+
+    return null;
+  }
+
+  Map<String, dynamic>? _detectInstalledApp(String text) {
+    final normalized = _fixSpeechAppName(text);
+    final compactInput = normalized.replaceAll(' ', '');
+
+    if (normalized.isEmpty || _installedApps.isEmpty) return null;
+
+    Map<String, dynamic>? bestMatch;
+    var bestScore = 0;
+
+    for (final app in _installedApps) {
+      final name = _normalize((app['name'] ?? '').toString());
+      final compactName = name.replaceAll(' ', '');
+      final packageName = (app['package'] ?? '').toString();
+
+      if (name.isEmpty || packageName.isEmpty) continue;
+
+      var score = 0;
+
+      if (name == normalized || compactName == compactInput) {
+        score = 120;
+      } else if (name.contains(normalized) || compactName.contains(compactInput)) {
+        score = 95;
+      } else if (normalized.contains(name) || compactInput.contains(compactName)) {
+        score = 85;
+      } else {
+        final distance = _levenshtein(compactInput, compactName);
+        final maxLen = compactInput.length > compactName.length ? compactInput.length : compactName.length;
+
+        if (distance <= 2) {
+          score = 80;
+        } else if (distance <= 4 && maxLen >= 6) {
+          score = 65;
+        }
+
+        final inputWords = normalized.split(' ');
+        final appWords = name.split(' ');
+
+        for (final inputWord in inputWords) {
+          if (inputWord.length < 2) continue;
+
+          for (final appWord in appWords) {
+            if (appWord == inputWord) {
+              score += 20;
+            } else if (appWord.contains(inputWord) || inputWord.contains(appWord)) {
+              score += 10;
+            } else if (_levenshtein(inputWord, appWord) <= 2) {
+              score += 8;
+            }
+          }
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = app;
+      }
+    }
+
+    if (bestScore >= 20) {
+      return bestMatch;
+    }
+
+    return null;
+  }
+
+  Future<bool> openKnownApp(String name) async {
+    final fixedName = _fixSpeechAppName(name);
+    final detectedKnown = _detectKnownApp(fixedName);
+
+    if (detectedKnown != null) {
+      final pkg = knownPackages[detectedKnown];
+      final scheme = knownSchemes[detectedKnown];
+
+      final opened = await _openByPackageOrScheme(
+        packageName: pkg,
+        scheme: scheme,
+      );
+
+      if (opened) return true;
+    }
+
+    if (_installedApps.isEmpty) {
+      await loadApps();
+    }
+
+    final installedMatch = _detectInstalledApp(fixedName);
+
+    if (installedMatch != null) {
+      final packageName = (installedMatch['package'] ?? '').toString();
+
+      if (packageName.isNotEmpty) {
+        final opened = await _openNativeApp(packageName);
+        if (opened) return true;
+      }
+    }
+
+    if (detectedKnown != null) {
+      final pkg = knownPackages[detectedKnown];
+
+      if (pkg != null && pkg.isNotEmpty) {
+        final storeOpened = await _openPlayStore(pkg);
+        if (storeOpened) return true;
+      }
+    }
+
+    return _openWebSearch(fixedName);
+  }
+
+  Future<bool> _openByPackageOrScheme({
+    required String? packageName,
+    required String? scheme,
+  }) async {
+    try {
+      if (scheme != null && scheme.isNotEmpty) {
+        final ok = await _tryLaunch(Uri.parse(scheme));
+        if (ok) return true;
+      }
+
+      if (Platform.isAndroid && packageName != null && packageName.isNotEmpty) {
+        final nativeOk = await _openNativeApp(packageName);
+        if (nativeOk) return true;
+
+        final intentUri = Uri.parse('intent://#Intent;package=$packageName;end');
+        final intentOk = await _tryLaunch(intentUri);
+        if (intentOk) return true;
       }
 
       return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _openNativeApp(String packageName) async {
+    if (!Platform.isAndroid) return false;
+
+    try {
+      final ok = await _platform.invokeMethod('openApp', {
+        'package': packageName,
+      });
+
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _openPlayStore(String packageName) async {
+    try {
+      final marketUri = Uri.parse('market://details?id=$packageName');
+      final marketOk = await _tryLaunch(marketUri);
+      if (marketOk) return true;
+
+      final webUri = Uri.parse(
+        'https://play.google.com/store/apps/details?id=$packageName',
+      );
+
+      return await _tryLaunch(webUri);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _openWebSearch(String name) async {
+    try {
+      final query = Uri.encodeComponent(_normalize(name));
+      final url = Uri.parse('https://www.google.com/search?q=$query');
+
+      return await _tryLaunch(url);
     } catch (_) {
       return false;
     }
