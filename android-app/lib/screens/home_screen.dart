@@ -1,13 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -38,7 +35,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final _speech = SpeechToText();
   final _tts = FlutterTts();
   final _random = Random();
-  final _audioPlayer = AudioPlayer();
 
   Timer? _restartTimer;
   Timer? _commandWindowTimer;
@@ -93,7 +89,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _controller.dispose();
     _speech.stop();
     _tts.stop();
-    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -231,37 +226,6 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  Future<bool> _tryCloudTts(String fullText) async {
-    try {
-      final response = await http
-          .post(
-            Uri.parse('https://megan-life.onrender.com/api/tts'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'text': fullText}),
-          )
-          .timeout(const Duration(seconds: 12));
-
-      if (response.statusCode != 200) return false;
-
-      final data = jsonDecode(response.body);
-      if (data is! Map || data['ok'] != true || data['audio'] == null) return false;
-
-      final bytes = base64Decode(data['audio'].toString());
-
-      await _audioPlayer.stop();
-      await _audioPlayer.play(BytesSource(bytes));
-
-      await _audioPlayer.onPlayerComplete.first.timeout(
-        const Duration(seconds: 90),
-        onTimeout: () {},
-      );
-
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<void> _say(String text) async {
     if (!_voiceReply) return;
 
@@ -277,16 +241,11 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       await _tts.stop();
-      await _audioPlayer.stop();
 
-      final playedCloudVoice = await _tryCloudTts(fullText);
-
-      if (!playedCloudVoice) {
-        for (final part in _splitTextForTts(fullText)) {
-          if (!_voiceReply || !mounted) break;
-          await _tts.speak(part);
-          await Future.delayed(const Duration(milliseconds: 250));
-        }
+      for (final part in _splitTextForTts(fullText)) {
+        if (!_voiceReply || !mounted) break;
+        await _tts.speak(part);
+        await Future.delayed(const Duration(milliseconds: 250));
       }
     } catch (_) {
       try {
