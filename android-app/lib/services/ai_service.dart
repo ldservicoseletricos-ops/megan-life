@@ -403,23 +403,39 @@ class AiService {
   Future<String> analyzeFileDirect(File file, {String question = ''}) async {
     try {
       final userId = await MeganConfig.getUserId();
+      final isImage = _isProbablyImageFile(file.path);
+      final endpoint = isImage ? '/api/images/analyze' : '/api/files/analyze';
       final request = http.MultipartRequest(
         'POST',
-        Uri.parse('${MeganConfig.baseUrl}/api/files/analyze'),
+        Uri.parse('${MeganConfig.baseUrl}$endpoint'),
       );
 
       request.fields['userId'] = userId;
-      if (question.trim().isNotEmpty) {
-        request.fields['question'] = question.trim();
-      }
+      request.fields['question'] = question.trim().isNotEmpty
+          ? question.trim()
+          : isImage
+              ? 'Analise esta imagem com visão avançada: descreva o que aparece, identifique objetos, contexto, textos visíveis, possíveis erros de tela e próximos passos úteis.'
+              : 'Analise este arquivo com profundidade e responda em português de forma prática.';
       request.files.add(await http.MultipartFile.fromPath('file', file.path));
 
       final streamed = await request.send();
       final response = await http.Response.fromStream(streamed);
-      return _safeParse(response, 'Falha ao analisar arquivo');
+      return _safeParse(response, isImage ? 'Falha ao analisar imagem' : 'Falha ao analisar arquivo');
     } catch (e) {
       return 'Erro ao analisar arquivo: $e';
     }
+  }
+
+  bool _isProbablyImageFile(String path) {
+    final value = path.toLowerCase();
+    return value.endsWith('.png') ||
+        value.endsWith('.jpg') ||
+        value.endsWith('.jpeg') ||
+        value.endsWith('.webp') ||
+        value.endsWith('.bmp') ||
+        value.endsWith('.gif') ||
+        value.endsWith('.tiff') ||
+        value.endsWith('.heic');
   }
 
   String buildCopilotPlan(String message) {

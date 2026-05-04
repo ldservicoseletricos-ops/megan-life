@@ -2779,17 +2779,33 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     if (result == null || result.files.single.path == null) return;
 
     final file = File(result.files.single.path!);
-    _add(true, 'Analisar arquivo: ${result.files.single.name}');
+    final fileName = result.files.single.name;
+    final lowerName = fileName.toLowerCase();
+    final isImage = lowerName.endsWith('.png') ||
+        lowerName.endsWith('.jpg') ||
+        lowerName.endsWith('.jpeg') ||
+        lowerName.endsWith('.webp') ||
+        lowerName.endsWith('.bmp') ||
+        lowerName.endsWith('.gif') ||
+        lowerName.endsWith('.tiff') ||
+        lowerName.endsWith('.heic');
+
+    _add(true, isImage ? 'Analisar imagem: $fileName' : 'Analisar arquivo: $fileName');
 
     if (!mounted) return;
     _safeSetState(() => _loading = true);
 
     try {
-      final answer = await _files.analyzeFile(file);
-      _add(false, answer);
-      await _say('Arquivo analisado. Veja o relatório na tela.');
+      final answer = await _ai.analyzeFileDirect(
+        file,
+        question: isImage
+            ? 'Analise esta imagem com visão avançada. Descreva o que aparece, identifique textos, objetos, erros de tela e explique próximos passos úteis.'
+            : 'Analise este arquivo com profundidade e responda em português de forma prática.',
+      );
+      _add(false, _cleanMeganOutput(answer));
+      await _say(isImage ? 'Imagem analisada. Veja a descrição na tela.' : 'Arquivo analisado. Veja o relatório na tela.');
     } catch (e) {
-      _add(false, 'Não consegui analisar o arquivo: $e');
+      _add(false, isImage ? 'Não consegui analisar a imagem: $e' : 'Não consegui analisar o arquivo: $e');
     } finally {
       if (!mounted) return;
       _safeSetState(() => _loading = false);
