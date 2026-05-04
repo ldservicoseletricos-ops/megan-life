@@ -450,6 +450,22 @@ class AiService {
   }
 
 
+
+  Uri _apiUri(String path) {
+    final base = MeganConfig.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final cleanPath = path.trim().replaceAll(RegExp(r'^/+'), '');
+
+    if (base.endsWith('/api') && cleanPath.startsWith('api/')) {
+      return Uri.parse('$base/${cleanPath.substring(4)}');
+    }
+
+    if (!base.endsWith('/api') && !cleanPath.startsWith('api/')) {
+      return Uri.parse('$base/api/$cleanPath');
+    }
+
+    return Uri.parse('$base/$cleanPath');
+  }
+
   Future<Map<String, dynamic>> generateFile({
     required String type,
     required String title,
@@ -458,7 +474,7 @@ class AiService {
   }) async {
     try {
       final r = await http.post(
-        Uri.parse('${MeganConfig.baseUrl}/api/files/generate'),
+        _apiUri('/api/files/generate'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'type': type,
