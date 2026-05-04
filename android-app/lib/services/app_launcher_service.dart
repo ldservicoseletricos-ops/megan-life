@@ -12,6 +12,10 @@ class AppLauncherService {
     'whatsapp': 'com.whatsapp',
     'zap': 'com.whatsapp',
     'wpp': 'com.whatsapp',
+    'whatsapp business': 'com.whatsapp.w4b',
+    'zap business': 'com.whatsapp.w4b',
+    'wpp business': 'com.whatsapp.w4b',
+    'business whatsapp': 'com.whatsapp.w4b',
     'telegram': 'org.telegram.messenger',
     'waze': 'com.waze',
     'maps': 'com.google.android.apps.maps',
@@ -48,6 +52,10 @@ class AppLauncherService {
     'whatsapp': 'whatsapp://send',
     'zap': 'whatsapp://send',
     'wpp': 'whatsapp://send',
+    'whatsapp business': 'whatsapp://send',
+    'zap business': 'whatsapp://send',
+    'wpp business': 'whatsapp://send',
+    'business whatsapp': 'whatsapp://send',
     'telegram': 'tg://',
     'waze': 'waze://',
     'maps': 'geo:0,0',
@@ -104,6 +112,140 @@ class AppLauncherService {
     return _normalize(text).replaceAll(' ', '');
   }
 
+  String _cleanWhatsAppPhone(String phone) {
+    var value = phone.replaceAll(RegExp(r'\D'), '');
+
+    if (value.startsWith('00')) {
+      value = value.substring(2);
+    }
+
+    while (value.startsWith('0') && value.length > 11) {
+      value = value.substring(1);
+    }
+
+    if (value.length == 10 || value.length == 11) {
+      value = '55$value';
+    }
+
+    return value;
+  }
+
+  bool _isValidWhatsAppPhone(String phone) {
+    final clean = _cleanWhatsAppPhone(phone);
+    return clean.length >= 12 && clean.length <= 15;
+  }
+
+  Future<bool> openWhatsAppChat({
+    String? phone,
+    String? message,
+    bool preferBusiness = false,
+  }) async {
+    final text = (message ?? '').trim();
+    final hasPhone = phone != null && phone.trim().isNotEmpty;
+
+    final packages = preferBusiness
+        ? const ['com.whatsapp.w4b', 'com.whatsapp']
+        : const ['com.whatsapp', 'com.whatsapp.w4b'];
+
+    if (!hasPhone) {
+      for (final packageName in packages) {
+        final opened = await _openNativeApp(packageName);
+        if (opened) return true;
+      }
+
+      final schemeOk = await _tryLaunch(Uri.parse('whatsapp://send'));
+      if (schemeOk) return true;
+
+      return await openKnownApp(preferBusiness ? 'whatsapp business' : 'whatsapp');
+    }
+
+    final cleanPhone = _cleanWhatsAppPhone(phone);
+    if (!_isValidWhatsAppPhone(cleanPhone)) {
+      return false;
+    }
+
+    final encodedMessage = Uri.encodeComponent(text);
+
+    final deepLink = encodedMessage.isEmpty
+        ? Uri.parse('whatsapp://send?phone=$cleanPhone')
+        : Uri.parse('whatsapp://send?phone=$cleanPhone&text=$encodedMessage');
+
+    final deepLinkOk = await _tryLaunch(deepLink);
+    if (deepLinkOk) return true;
+
+    final webLink = encodedMessage.isEmpty
+        ? Uri.parse('https://wa.me/$cleanPhone')
+        : Uri.parse('https://wa.me/$cleanPhone?text=$encodedMessage');
+
+    final webOk = await _tryLaunch(webLink);
+    if (webOk) return true;
+
+    for (final packageName in packages) {
+      final opened = await _openNativeApp(packageName);
+      if (opened) return true;
+    }
+
+    return false;
+  }
+
+  Future<bool> sendWhatsAppMessage({
+    required String phone,
+    required String message,
+    bool preferBusiness = false,
+  }) async {
+    return openWhatsAppChat(
+      phone: phone,
+      message: message,
+      preferBusiness: preferBusiness,
+    );
+  }
+
+
+
+
+  Future<bool> hasWhatsAppNormal() async {
+    return _isPackageInstalled('com.whatsapp');
+  }
+
+  Future<bool> hasWhatsAppBusiness() async {
+    return _isPackageInstalled('com.whatsapp.w4b');
+  }
+
+  Future<bool> openWhatsAppNormal() async {
+    final nativeOk = await _openNativeApp('com.whatsapp');
+    if (nativeOk) return true;
+
+    final schemeOk = await _tryLaunch(Uri.parse('whatsapp://send'));
+    if (schemeOk) return true;
+
+    return _openPlayStore('com.whatsapp');
+  }
+
+  Future<bool> openWhatsAppBusiness() async {
+    final nativeOk = await _openNativeApp('com.whatsapp.w4b');
+    if (nativeOk) return true;
+
+    // Evita usar whatsapp://send como fallback aqui, porque quando o WhatsApp normal
+    // também está instalado o Android pode abrir o app normal em vez do Business.
+    return _openPlayStore('com.whatsapp.w4b');
+  }
+
+  Future<bool> _isPackageInstalled(String packageName) async {
+    if (!Platform.isAndroid || packageName.trim().isEmpty) return false;
+
+    if (_installedApps.isEmpty) {
+      await loadApps();
+    }
+
+    for (final app in _installedApps) {
+      final currentPackage = (app['package'] ?? '').toString();
+      if (currentPackage == packageName) return true;
+    }
+
+    return false;
+  }
+
+
   String _fixSpeechAppName(String text) {
     final normalized = _normalize(text);
     final compact = _compact(text);
@@ -137,6 +279,17 @@ class AppLauncherService {
         compact.contains('iutube') ||
         compact.contains('yt')) {
       return 'youtube';
+    }
+
+    if ((compact.contains('business') ||
+            normalized.contains('comercial') ||
+            normalized.contains('empresa')) &&
+        (compact.contains('whatsapp') ||
+            compact.contains('wattsapp') ||
+            compact.contains('whats') ||
+            compact.contains('zap') ||
+            compact.contains('wpp'))) {
+      return 'whatsapp business';
     }
 
     if (compact.contains('whatsapp') ||
@@ -293,6 +446,31 @@ class AppLauncherService {
     final fixedName = _fixSpeechAppName(name);
     final detectedKnown = _detectKnownApp(fixedName);
 
+    if (detectedKnown == 'whatsapp' || detectedKnown == 'zap' || detectedKnown == 'wpp') {
+      final nativeWhatsApp = await _openNativeApp('com.whatsapp');
+      if (nativeWhatsApp) return true;
+
+      final nativeBusiness = await _openNativeApp('com.whatsapp.w4b');
+      if (nativeBusiness) return true;
+
+      final schemeWhatsApp = await _tryLaunch(Uri.parse('whatsapp://send'));
+      if (schemeWhatsApp) return true;
+    }
+
+    if (detectedKnown == 'whatsapp business' ||
+        detectedKnown == 'zap business' ||
+        detectedKnown == 'wpp business' ||
+        detectedKnown == 'business whatsapp') {
+      final nativeBusiness = await _openNativeApp('com.whatsapp.w4b');
+      if (nativeBusiness) return true;
+
+      final nativeWhatsApp = await _openNativeApp('com.whatsapp');
+      if (nativeWhatsApp) return true;
+
+      final schemeWhatsApp = await _tryLaunch(Uri.parse('whatsapp://send'));
+      if (schemeWhatsApp) return true;
+    }
+
     if (detectedKnown != null) {
       final pkg = knownPackages[detectedKnown];
       final scheme = knownSchemes[detectedKnown];
@@ -411,4 +589,82 @@ class AppLauncherService {
       return false;
     }
   }
+
+
+  bool isMediaAppName(String name) {
+    final fixed = _fixSpeechAppName(name);
+    final normalized = _normalize(fixed);
+
+    return normalized.contains('youtube') ||
+        normalized.contains('yt music') ||
+        normalized.contains('youtube music') ||
+        normalized.contains('spotify') ||
+        normalized.contains('tiktok') ||
+        normalized.contains('tik tok') ||
+        normalized.contains('instagram') ||
+        normalized.contains('reels') ||
+        normalized.contains('netflix') ||
+        normalized.contains('prime video') ||
+        normalized.contains('disney') ||
+        normalized.contains('max') ||
+        normalized.contains('deezer') ||
+        normalized.contains('musica') ||
+        normalized.contains('música') ||
+        normalized.contains('video') ||
+        normalized.contains('vídeo');
+  }
+
+  Future<bool> openMediaApp(String name) async {
+    if (!isMediaAppName(name)) return false;
+    return openKnownApp(name);
+  }
+
+  bool isCommunicationAppName(String name) {
+    final fixed = _fixSpeechAppName(name);
+    final normalized = _normalize(fixed);
+
+    return normalized.contains('whatsapp') ||
+        normalized.contains('zap') ||
+        normalized.contains('wpp') ||
+        normalized.contains('telegram') ||
+        normalized.contains('gmail') ||
+        normalized.contains('email') ||
+        normalized.contains('e mail') ||
+        normalized.contains('mensagem') ||
+        normalized.contains('messages') ||
+        normalized.contains('sms') ||
+        normalized.contains('messenger') ||
+        normalized.contains('signal');
+  }
+
+  Future<bool> openCommunicationApp(String name) async {
+    if (!isCommunicationAppName(name)) return false;
+    return openKnownApp(name);
+  }
+
+  bool canOpenExternalAppName(String name) {
+    final fixed = _fixSpeechAppName(name);
+    final normalized = _normalize(fixed);
+
+    if (normalized.isEmpty) return false;
+
+    // Comunicação continua no fluxo próprio para preservar áudio de mensagens.
+    if (isCommunicationAppName(normalized)) {
+      return false;
+    }
+
+    if (knownPackages.containsKey(normalized)) return true;
+
+    final detectedKnown = _detectKnownApp(normalized);
+    if (detectedKnown != null) return true;
+
+    final installed = _detectInstalledApp(normalized);
+    return installed != null;
+  }
+
+  Future<bool> openExternalApp(String name) async {
+    if (!canOpenExternalAppName(name)) return false;
+    return openKnownApp(name);
+  }
+
 }

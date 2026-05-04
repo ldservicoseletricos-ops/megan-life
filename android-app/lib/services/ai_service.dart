@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'config.dart';
+import 'memory_service.dart';
 
 class AiService {
+  final MeganMemoryService _localMemory = MeganMemoryService();
   String _normalize(String text) {
     return text
         .toLowerCase()
@@ -114,11 +117,36 @@ class AiService {
         };
       }
 
-      if (lower.startsWith('lembre que ')) {
-        final value = message.replaceFirst(
-          RegExp(r'^lembre que\s+', caseSensitive: false),
-          '',
-        );
+      if (lower.startsWith('esqueça ') ||
+          lower.startsWith('esqueca ') ||
+          lower.startsWith('apague da memória ') ||
+          lower.startsWith('apague da memoria ')) {
+        final value = message
+            .replaceFirst(RegExp(r'^esqueça\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^esqueca\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^apague da memória\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^apague da memoria\\s+', caseSensitive: false), '')
+            .trim();
+
+        await _localMemory.forget(value);
+
+        return {
+          'ok': true,
+          'actions': [
+            {'type': 'chat', 'value': message}
+          ],
+          'response': 'Certo, Luiz. Apaguei essa memória local quando encontrei algo relacionado.',
+        };
+      }
+
+      if (lower.startsWith('lembre que ') ||
+          lower.startsWith('lembra que ') ||
+          lower.startsWith('memorize que ')) {
+        final value = message
+            .replaceFirst(RegExp(r'^lembre que\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^lembra que\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^memorize que\\s+', caseSensitive: false), '')
+            .trim();
 
         return {
           'ok': true,
@@ -137,7 +165,8 @@ class AiService {
             'message': message,
             'userId': userId,
             'device': 'android-real-device',
-            'mode': 'megan-life-4.8-production',
+            'mode': 'megan-life-7.1-memory',
+            'memoryContext': await _localMemory.buildMemoryContext(),
           }),
         );
 
@@ -244,6 +273,8 @@ class AiService {
   }
 
   Future<String> getProfile() async {
+    final localProfile = await _localMemory.profileText();
+
     try {
       final userId = await MeganConfig.getUserId();
 
@@ -259,12 +290,12 @@ class AiService {
 
       final d = jsonDecode(body);
 
-      if (d['ok'] != true) return 'Não consegui acessar seu perfil.';
+      if (d['ok'] != true) return localProfile;
 
       final profile = d['profile'] ?? {};
 
       if (profile is! Map || profile.isEmpty) {
-        return 'Ainda não sei muito sobre você. Me conte mais.';
+        return localProfile;
       }
 
       final buffer = StringBuffer();
@@ -280,11 +311,18 @@ class AiService {
 
       return buffer.toString();
     } catch (e) {
-      return 'Erro ao buscar perfil: $e';
+      return localProfile;
     }
   }
 
   Future<String> remember(String key, String value) async {
+    await _localMemory.remember(
+      key: key,
+      value: value,
+      type: key == 'manual' ? 'manual' : 'general',
+      priority: key == 'manual' ? 5 : 3,
+    );
+
     try {
       final userId = await MeganConfig.getUserId();
 
@@ -308,13 +346,77 @@ class AiService {
 
       return 'Não consegui salvar isso.';
     } catch (e) {
-      return 'Erro ao salvar memória: $e';
+      return 'Memorizado localmente neste aparelho.';
+    }
+  }
+
+
+  Future<Map<String, dynamic>> generateFile({
+    required String type,
+    required String title,
+    required String content,
+    String? fileName,
+  }) async {
+    try {
+      final r = await http.post(
+        Uri.parse('${MeganConfig.baseUrl}/api/files/generate'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'type': type,
+          'title': title,
+          'content': content,
+          'fileName': fileName ?? title,
+        }),
+      );
+
+      final d = jsonDecode(r.body);
+      if (r.statusCode >= 400 || d['ok'] != true) {
+        return {
+          'ok': false,
+          'message': d['error']?.toString() ?? 'Falha ao gerar arquivo.',
+        };
+      }
+
+      return {
+        'ok': true,
+        'message': d['message']?.toString() ?? 'Arquivo gerado.',
+        'url': d['url']?.toString() ?? '',
+        'fileName': d['fileName']?.toString() ?? '',
+        'type': d['type']?.toString() ?? type,
+      };
+    } catch (e) {
+      return {
+        'ok': false,
+        'message': 'Erro ao gerar arquivo: $e',
+      };
+    }
+  }
+
+  Future<String> analyzeFileDirect(File file, {String question = ''}) async {
+    try {
+      final userId = await MeganConfig.getUserId();
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('${MeganConfig.baseUrl}/api/files/analyze'),
+      );
+
+      request.fields['userId'] = userId;
+      if (question.trim().isNotEmpty) {
+        request.fields['question'] = question.trim();
+      }
+      request.files.add(await http.MultipartFile.fromPath('file', file.path));
+
+      final streamed = await request.send();
+      final response = await http.Response.fromStream(streamed);
+      return _safeParse(response, 'Falha ao analisar arquivo');
+    } catch (e) {
+      return 'Erro ao analisar arquivo: $e';
     }
   }
 
   String buildCopilotPlan(String message) {
     return '''
-🧠 Copiloto Megan 4.8 ativado
+🧠 Copiloto Megan 7.1 com memória ativado
 
 Plano sugerido:
 1. Identificar sua prioridade principal.

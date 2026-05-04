@@ -17,6 +17,10 @@ class FallbackHealthService {
           'bodyFat': 0,
         },
         'alerts': [],
+        'guidance': [
+          'Conecte o Health Connect e permita acesso aos dados do relógio para análises reais.',
+        ],
+        'disclaimer': 'Orientação geral. Não substitui avaliação médica.',
         'message': 'Fallback ativo. Conecte Health Connect para dados reais.',
       };
     } catch (e) {

@@ -2,7 +2,7 @@ name: megan_life
 description: Megan Life - Assistente Inteligente
 publish_to: "none"
 
-version: 4.8.0+48
+version: 7.0.2+702
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
