@@ -32,6 +32,62 @@ class AiService {
     );
   }
 
+  bool _isImageGenerationCommand(String text) {
+    final command = _normalize(text);
+    final hasImageWord = command.contains('imagem') ||
+        command.contains('foto') ||
+        command.contains('desenho') ||
+        command.contains('arte') ||
+        command.contains('ilustracao') ||
+        command.contains('ilustração');
+
+    if (!hasImageWord) return false;
+
+    final wantsGeneration = command.contains('gerar') ||
+        command.contains('gere') ||
+        command.contains('criar') ||
+        command.contains('crie') ||
+        command.contains('fazer') ||
+        command.contains('faca') ||
+        command.contains('faça') ||
+        command.contains('desenhar') ||
+        command.contains('desenhe') ||
+        command.contains('montar') ||
+        command.contains('monte') ||
+        command.contains('enviar') ||
+        command.contains('envie') ||
+        command.contains('mandar') ||
+        command.contains('mande');
+
+    final wantsAnalysis = command.contains('analisar') ||
+        command.contains('analise') ||
+        command.contains('ler imagem') ||
+        command.contains('ver imagem') ||
+        command.contains('o que tem nessa imagem') ||
+        command.contains('o que aparece nessa imagem');
+
+    return wantsGeneration && !wantsAnalysis;
+  }
+
+  String _buildImagePrompt(String message) {
+    var prompt = message.trim();
+    prompt = prompt.replaceFirst(
+      RegExp(r'^(gerar|gere|criar|crie|fazer|faça|faca|desenhar|desenhe|montar|monte|enviar|envie|mandar|mande)\s+', caseSensitive: false),
+      '',
+    );
+    prompt = prompt.replaceFirst(
+      RegExp(r'^(uma|um)\s+', caseSensitive: false),
+      '',
+    );
+    prompt = prompt.trim();
+
+    if (prompt.isEmpty || _normalize(prompt) == 'imagem') {
+      return 'Crie uma imagem premium, futurista e profissional da Megan Life, uma assistente inteligente com visual moderno, luzes suaves, tecnologia avançada e estilo cinematográfico.';
+    }
+
+    return prompt;
+  }
+
   List<Map<String, dynamic>> _detectActions(String message) {
     final parts = _splitCommands(message);
     final List<Map<String, dynamic>> actions = [];
@@ -39,6 +95,11 @@ class AiService {
     for (final part in parts) {
       final text = part.trim();
       if (text.isEmpty) continue;
+
+      if (_isImageGenerationCommand(text)) {
+        actions.add({'type': 'generate_image', 'value': _buildImagePrompt(message)});
+        continue;
+      }
 
       if (text.contains('abrir') || text.contains('abre')) {
         final app = text.replaceAll(RegExp(r'(abrir|abre)'), '').trim();
@@ -154,6 +215,44 @@ class AiService {
             {'type': 'chat', 'value': message}
           ],
           'response': await remember('manual', value),
+        };
+      }
+
+      if (actions.length == 1 && actions.first['type'] == 'generate_image') {
+        final prompt = (actions.first['value'] ?? message).toString().trim();
+        final r = await http.post(
+          Uri.parse('${MeganConfig.baseUrl}/api/generate-image'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'prompt': prompt.isEmpty ? message : prompt,
+            'userId': userId,
+          }),
+        );
+
+        final d = _safeParseJson(r);
+
+        if (d == null) {
+          return {
+            'ok': false,
+            'actions': actions,
+            'response': _serverInvalidResponseMessage(r),
+          };
+        }
+
+        if (r.statusCode >= 400 || d['ok'] != true) {
+          return {
+            'ok': false,
+            'actions': actions,
+            'response': d['error']?.toString() ?? d['message']?.toString() ?? 'Erro ao gerar imagem.',
+          };
+        }
+
+        return {
+          'ok': true,
+          'actions': actions,
+          'response': d['message']?.toString() ?? 'Imagem gerada com sucesso.',
+          'image': d['image']?.toString() ?? d['imageBase64']?.toString() ?? '',
+          'mime': d['mime']?.toString() ?? 'image/png',
         };
       }
 

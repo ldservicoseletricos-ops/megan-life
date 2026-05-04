@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -1873,6 +1874,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _safeSetState(() => _messages.add(_Message(user, safeText)));
   }
 
+  void _addImage(bool user, String imageBase64, {String caption = ''}) {
+    if (!mounted) return;
+
+    final safeImage = imageBase64.trim();
+    if (safeImage.isEmpty) return;
+
+    final safeCaption = user ? caption.trim() : _cleanMeganOutput(caption);
+    _safeSetState(() => _messages.add(_Message(
+          user,
+          safeCaption.isEmpty ? 'Imagem gerada pela Megan.' : safeCaption,
+          imageBase64: safeImage,
+        )));
+  }
+
   void _scheduleConversationIdleClose() {
     _conversationIdleTimer?.cancel();
 
@@ -2630,6 +2645,15 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
           : [];
 
       final String response = (result['response'] ?? '').toString();
+      final String generatedImage = (result['image'] ?? '').toString().trim();
+
+      if (generatedImage.isNotEmpty) {
+        final answer = response.isNotEmpty ? response : 'Imagem gerada com sucesso.';
+        _addImage(false, generatedImage, caption: answer);
+        _rememberConversation(cleanText, answer);
+        await _say('Imagem gerada com sucesso. Ela está na tela.');
+        return;
+      }
 
       if (actions.isEmpty) {
         final rawAnswer = response.isNotEmpty ? response : await _ai.chat(contextualText);
@@ -2667,7 +2691,25 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
         _setVoiceStatus('Executando: $type${value.isNotEmpty ? ' $value' : ''}');
 
         try {
-          if (type == 'system') {
+          if (type == 'generate_image') {
+            final prompt = value.isEmpty ? cleanText : value;
+            final imageResult = await _ai.process(prompt);
+            final generatedImage = (imageResult['image'] ?? '').toString().trim();
+            final answer = (imageResult['response'] ?? '').toString().trim();
+
+            if (generatedImage.isNotEmpty) {
+              _addImage(false, generatedImage, caption: answer.isNotEmpty ? answer : 'Imagem gerada com sucesso.');
+              _rememberConversation(cleanText, answer.isNotEmpty ? answer : 'Imagem gerada com sucesso.');
+              await _say('Imagem gerada com sucesso. Ela está na tela.');
+            } else {
+              final error = answer.isNotEmpty ? answer : 'Não consegui gerar a imagem agora.';
+              _add(false, error);
+              _rememberConversation(cleanText, error);
+              await _say(error);
+            }
+
+            await Future.delayed(const Duration(milliseconds: 900));
+          } else if (type == 'system') {
             await _runSystemAction(value);
             await Future.delayed(const Duration(milliseconds: 500));
           } else if (type == 'open_app') {
@@ -3998,6 +4040,17 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     );
   }
 
+  String _normalizeImageBase64(String value) {
+    final clean = value.trim();
+    if (clean.startsWith('data:image')) {
+      final commaIndex = clean.indexOf(',');
+      if (commaIndex >= 0 && commaIndex + 1 < clean.length) {
+        return clean.substring(commaIndex + 1).trim();
+      }
+    }
+    return clean;
+  }
+
   Widget _premiumMessageBubble(_Message message) {
     final isUser = message.user;
 
@@ -4047,10 +4100,38 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
               ],
             ),
             const SizedBox(height: 7),
-            Text(
-              message.text,
-              style: const TextStyle(fontSize: 15, height: 1.38),
-            ),
+            if (message.imageBase64 != null && message.imageBase64!.trim().isNotEmpty) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Image.memory(
+                  base64Decode(_normalizeImageBase64(message.imageBase64!)),
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(.18),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.white.withOpacity(.08)),
+                    ),
+                    child: const Text(
+                      'Não consegui exibir a imagem recebida.',
+                      style: TextStyle(fontSize: 14, height: 1.35),
+                    ),
+                  ),
+                ),
+              ),
+              if (message.text.trim().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  message.text,
+                  style: const TextStyle(fontSize: 15, height: 1.38),
+                ),
+              ],
+            ] else
+              Text(
+                message.text,
+                style: const TextStyle(fontSize: 15, height: 1.38),
+              ),
           ],
         ),
       ),
@@ -4415,8 +4496,9 @@ class _WakeResult {
 class _Message {
   final bool user;
   final String text;
+  final String? imageBase64;
 
-  _Message(this.user, this.text);
+  _Message(this.user, this.text, {this.imageBase64});
 }
 
 class _MemoryEntry {
