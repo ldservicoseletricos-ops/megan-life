@@ -369,11 +369,19 @@ class AiService {
         }),
       );
 
-      final d = jsonDecode(r.body);
+      final d = _safeParseJson(r);
+
+      if (d == null) {
+        return {
+          'ok': false,
+          'message': _serverInvalidResponseMessage(r),
+        };
+      }
+
       if (r.statusCode >= 400 || d['ok'] != true) {
         return {
           'ok': false,
-          'message': d['error']?.toString() ?? 'Falha ao gerar arquivo.',
+          'message': d['error']?.toString() ?? d['message']?.toString() ?? 'Falha ao gerar arquivo.',
         };
       }
 
@@ -429,18 +437,52 @@ $message
 ''';
   }
 
-  String _safeParse(http.Response r, String fallback) {
+
+  Map<String, dynamic>? _safeParseJson(http.Response r) {
     try {
       final body = r.body.trim();
 
-      if (body.startsWith('<!DOCTYPE') || body.startsWith('<html')) {
-        return 'Erro no servidor (backend retornou HTML).';
+      if (body.isEmpty || body.startsWith('<!DOCTYPE') || body.startsWith('<html')) {
+        return null;
       }
 
-      final d = jsonDecode(body);
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _serverInvalidResponseMessage(http.Response r) {
+    final body = r.body.trim().toLowerCase();
+
+    if (body.startsWith('<!doctype') || body.startsWith('<html')) {
+      return 'Erro no servidor: o backend retornou HTML em vez de JSON. Verifique se a rota está ativa no Render e tente novamente.';
+    }
+
+    if (r.statusCode == 404) {
+      return 'Erro no servidor: rota não encontrada no backend.';
+    }
+
+    if (r.statusCode >= 500) {
+      return 'Erro no servidor: falha interna no backend.';
+    }
+
+    return 'Erro no servidor: resposta inválida do backend.';
+  }
+
+  String _safeParse(http.Response r, String fallback) {
+    try {
+      final d = _safeParseJson(r);
+
+      if (d == null) {
+        return _serverInvalidResponseMessage(r);
+      }
 
       if (r.statusCode >= 400 || d['ok'] != true) {
-        return d['error'] ?? fallback;
+        return d['error']?.toString() ?? d['message']?.toString() ?? fallback;
       }
 
       if (d.containsKey('answer')) return d['answer'];
