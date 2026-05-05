@@ -367,6 +367,24 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         val dateOption = options.firstOrNull { isDateCommand(it) }
         if (dateOption != null) return dateOption.lowercase(Locale("pt", "BR"))
 
+        val appOption = options.firstOrNull { isAnyOpenExternalAppCommand(it) }
+        if (appOption != null) return appOption.lowercase(Locale("pt", "BR"))
+
+        val greetingOption = options.firstOrNull { isGreetingCommand(it) }
+        if (greetingOption != null) return greetingOption.lowercase(Locale("pt", "BR"))
+
+        val identityOption = options.firstOrNull { isIdentityCommand(it) }
+        if (identityOption != null) return identityOption.lowercase(Locale("pt", "BR"))
+
+        val statusOption = options.firstOrNull { isStatusCommand(it) }
+        if (statusOption != null) return statusOption.lowercase(Locale("pt", "BR"))
+
+        val stopOption = options.firstOrNull { isStopPresenceCommand(it) }
+        if (stopOption != null) return stopOption.lowercase(Locale("pt", "BR"))
+
+        val openMeganOption = options.firstOrNull { isOpenMeganCommand(it) }
+        if (openMeganOption != null) return openMeganOption.lowercase(Locale("pt", "BR"))
+
         val wakeOption = options.firstOrNull { looksLikeWakeCommand(it) }
         if (wakeOption != null) return wakeOption.lowercase(Locale("pt", "BR"))
 
@@ -390,9 +408,6 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        // Correção principal:
-        // Depois que "ok Megan" foi detectado, aceita o próximo texto como comando
-        // mesmo que o tempo da janela tenha oscilado entre callbacks do Android.
         if (awaitingCommandAfterWake) {
             awaitingCommandAfterWake = false
             commandWindowUntil = 0L
@@ -479,32 +494,54 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
                 speakNative("Hoje é $date.")
             }
 
-            realCommand.contains("seu nome") ||
-                realCommand.contains("qual seu nome") ||
-                realCommand.contains("quem e voce") -> {
+            isOpenWhatsAppBusinessCommand(realCommand) -> {
+                speakNative("Abrindo WhatsApp Business.")
+                openApp("com.whatsapp.w4b", "WhatsApp Business")
+            }
+
+            isOpenWhatsAppCommand(realCommand) -> {
+                speakNative("Abrindo WhatsApp.")
+                openApp("com.whatsapp", "WhatsApp")
+            }
+
+            isOpenWazeCommand(realCommand) -> {
+                speakNative("Abrindo Waze.")
+                openApp("com.waze", "Waze")
+            }
+
+            isOpenMapsCommand(realCommand) -> {
+                speakNative("Abrindo Google Maps.")
+                openApp("com.google.android.apps.maps", "Google Maps")
+            }
+
+            isOpenYouTubeCommand(realCommand) -> {
+                speakNative("Abrindo YouTube.")
+                openApp("com.google.android.youtube", "YouTube")
+            }
+
+            isGreetingCommand(realCommand) -> {
+                speakNative("Olá Luiz. Estou ouvindo. Como posso ajudar?")
+            }
+
+            isIdentityCommand(realCommand) -> {
                 speakNative("Eu sou a Megan Life, sua assistente.")
             }
 
-            realCommand.contains("teste") || realCommand.contains("funcionando") -> {
+            isStatusCommand(realCommand) -> {
                 speakNative("Estou funcionando em segundo plano, Luiz.")
             }
 
-            realCommand.contains("parar") ||
-                realCommand.contains("desativar presenca") ||
-                realCommand.contains("desliga presenca") -> {
+            isOpenMeganCommand(realCommand) -> {
+                speakNative("Abrindo a Megan.")
+                openMainActivity()
+            }
+
+            isStopPresenceCommand(realCommand) -> {
                 speakNative("Tudo bem, Luiz. Vou desativar a presença segura.")
                 mainHandler.postDelayed({
                     stopPresence()
                 }, 1400L)
                 return
-            }
-
-            realCommand.contains("abrir megan") ||
-                realCommand.contains("abre megan") ||
-                realCommand.contains("abrir o app") ||
-                realCommand.contains("abre o app") -> {
-                speakNative("Abrindo a Megan.")
-                openMainActivity()
             }
 
             else -> {
@@ -546,6 +583,115 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
             command.contains("que dia e") ||
             command.contains("que dia e hoje") ||
             command.contains("qual e a data")
+    }
+
+    private fun isGreetingCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command == "oi" ||
+            command == "ola" ||
+            command == "olá" ||
+            command.contains("bom dia") ||
+            command.contains("boa tarde") ||
+            command.contains("boa noite") ||
+            command.contains("tudo bem")
+    }
+
+    private fun isIdentityCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("seu nome") ||
+            command.contains("qual seu nome") ||
+            command.contains("quem e voce") ||
+            command.contains("quem voce e") ||
+            command.contains("quem é você")
+    }
+
+    private fun isStatusCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("teste") ||
+            command.contains("funcionando") ||
+            command.contains("esta ai") ||
+            command.contains("esta ouvindo") ||
+            command.contains("me escuta") ||
+            command.contains("me ouve")
+    }
+
+    private fun isOpenMeganCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("abrir megan") ||
+            command.contains("abre megan") ||
+            command.contains("abrir o app") ||
+            command.contains("abre o app") ||
+            command.contains("abrir aplicativo") ||
+            command.contains("abre aplicativo")
+    }
+
+    private fun isStopPresenceCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("parar presenca") ||
+            command.contains("desativar presenca") ||
+            command.contains("desliga presenca") ||
+            command.contains("desligar presenca") ||
+            command.contains("parar de ouvir") ||
+            command.contains("pare de ouvir")
+    }
+
+    private fun isAnyOpenExternalAppCommand(text: String): Boolean {
+        return isOpenWhatsAppCommand(text) ||
+            isOpenWhatsAppBusinessCommand(text) ||
+            isOpenWazeCommand(text) ||
+            isOpenMapsCommand(text) ||
+            isOpenYouTubeCommand(text)
+    }
+
+    private fun isOpenWhatsAppCommand(text: String): Boolean {
+        val command = normalize(text)
+        return command.contains("abrir whatsapp") ||
+            command.contains("abre whatsapp") ||
+            command.contains("abrir zap") ||
+            command.contains("abre zap") ||
+            command == "whatsapp" ||
+            command == "zap"
+    }
+
+    private fun isOpenWhatsAppBusinessCommand(text: String): Boolean {
+        val command = normalize(text)
+        return command.contains("whatsapp business") ||
+            command.contains("zap business") ||
+            command.contains("abrir business") ||
+            command.contains("abre business")
+    }
+
+    private fun isOpenWazeCommand(text: String): Boolean {
+        val command = normalize(text)
+        return command.contains("abrir waze") ||
+            command.contains("abre waze") ||
+            command == "waze"
+    }
+
+    private fun isOpenMapsCommand(text: String): Boolean {
+        val command = normalize(text)
+        return command.contains("google maps") ||
+            command.contains("abrir maps") ||
+            command.contains("abre maps") ||
+            command.contains("abrir mapa") ||
+            command.contains("abre mapa") ||
+            command.contains("abrir google mapas") ||
+            command.contains("abre google mapas")
+    }
+
+    private fun isOpenYouTubeCommand(text: String): Boolean {
+        val command = normalize(text)
+        return command.contains("abrir youtube") ||
+            command.contains("abre youtube") ||
+            command.contains("abrir you tube") ||
+            command.contains("abre you tube") ||
+            command == "youtube" ||
+            command == "you tube"
     }
 
     private fun looksLikeWakeCommand(text: String): Boolean {
@@ -637,6 +783,21 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
             startActivity(intent)
         } catch (_: Exception) {
             showWakeNotification()
+        }
+    }
+
+    private fun openApp(packageName: String, appName: String) {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            } else {
+                speakNative("Não encontrei o $appName instalado.")
+            }
+        } catch (_: Exception) {
+            speakNative("Erro ao tentar abrir o $appName.")
         }
     }
 
