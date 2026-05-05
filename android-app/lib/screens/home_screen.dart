@@ -2624,6 +2624,90 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
 
+  bool _isDateTimeCommand(String text) {
+    final command = _normalize(text);
+    if (command.isEmpty) return false;
+
+    return command == 'hora' ||
+        command == 'horas' ||
+        command == 'que horas sao' ||
+        command == 'que hora e' ||
+        command == 'que hora eh' ||
+        command == 'me diga as horas' ||
+        command == 'me fala as horas' ||
+        command.contains('que horas sao') ||
+        command.contains('que hora e') ||
+        command.contains('que hora eh') ||
+        command.contains('hora agora') ||
+        command.contains('horas agora') ||
+        command.contains('data de hoje') ||
+        command.contains('que dia e hoje') ||
+        command.contains('que dia eh hoje') ||
+        command.contains('dia de hoje');
+  }
+
+  String _buildDateTimeAnswer(String text) {
+    final command = _normalize(text);
+    final now = DateTime.now();
+
+    const weekdays = <int, String>{
+      DateTime.monday: 'segunda-feira',
+      DateTime.tuesday: 'terça-feira',
+      DateTime.wednesday: 'quarta-feira',
+      DateTime.thursday: 'quinta-feira',
+      DateTime.friday: 'sexta-feira',
+      DateTime.saturday: 'sábado',
+      DateTime.sunday: 'domingo',
+    };
+
+    const months = <int, String>{
+      1: 'janeiro',
+      2: 'fevereiro',
+      3: 'março',
+      4: 'abril',
+      5: 'maio',
+      6: 'junho',
+      7: 'julho',
+      8: 'agosto',
+      9: 'setembro',
+      10: 'outubro',
+      11: 'novembro',
+      12: 'dezembro',
+    };
+
+    final hour = now.hour.toString().padLeft(2, '0');
+    final minute = now.minute.toString().padLeft(2, '0');
+    final weekday = weekdays[now.weekday] ?? '';
+    final month = months[now.month] ?? '';
+    final dateText = '$weekday, ${now.day} de $month de ${now.year}';
+
+    final wantsDate = command.contains('data') ||
+        command.contains('dia de hoje') ||
+        command.contains('que dia');
+    final wantsTime = command.contains('hora') || command.contains('horas');
+
+    if (wantsDate && !wantsTime) {
+      return 'Hoje é $dateText.';
+    }
+
+    if (wantsDate && wantsTime) {
+      return 'Agora são $hour:$minute. Hoje é $dateText.';
+    }
+
+    return 'Agora são $hour:$minute.';
+  }
+
+  Future<bool> _tryHandleDateTimeCommand(String text) async {
+    if (!_isDateTimeCommand(text)) return false;
+
+    final answer = _buildDateTimeAnswer(text);
+    _add(false, answer);
+    _rememberConversation(text.trim(), answer);
+    await _say(answer);
+    return true;
+  }
+
+
   bool _isFileGenerationCommand(String text) {
     final command = _normalize(text);
     final hasGenerate = command.contains('gerar') ||
@@ -2767,6 +2851,9 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     _safeSetState(() => _loading = true);
 
     try {
+      final handledByDateTime = await _tryHandleDateTimeCommand(cleanText);
+      if (handledByDateTime) return;
+
       if (_isEndConversationCommand(cleanText)) {
         _commandMode = false;
         _wakeMessageShown = false;
@@ -3558,6 +3645,16 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     // Não entra no chat e não vai para a IA.
     if (_isWakeOnlyCommand(words) || _isWakeOnlyCommand(command)) {
       _enterCommandMode();
+      return;
+    }
+
+    // Comandos curtos e locais, como "que horas são", devem ser aceitos
+    // mesmo quando o STT entrega primeiro como parcial. Isso evita o caso
+    // em que a Megan acorda, mas parece não fazer nada depois da pergunta.
+    if (_isDateTimeCommand(command)) {
+      _rememberAcceptedAudio(command);
+      _setVoiceStatus('Comando capturado: $command');
+      _runCommandDebounced(command, fast: true);
       return;
     }
 

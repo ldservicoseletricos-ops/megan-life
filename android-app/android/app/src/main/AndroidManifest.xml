@@ -12,6 +12,7 @@
     <!-- 🔥 PRESENÇA / BACKGROUND SEGURO -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
@@ -25,22 +26,15 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
 
-    <!-- Android 14+ foreground service permissions.
-         Mantidas apenas as compatíveis com o app atual e sem background agressivo. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
-
-    <!-- 📍 LOCALIZAÇÃO / NAVEGAÇÃO
-         Versão Play Store segura: apenas localização em uso, sem localização em segundo plano. -->
+    <!-- 📍 LOCALIZAÇÃO / NAVEGAÇÃO -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
-    <!-- 🏃 SAÚDE / ATIVIDADE / SENSORES ANDROID
-         Versão segura: sem BODY_SENSORS_BACKGROUND. -->
+    <!-- 🏃 SAÚDE / ATIVIDADE / SENSORES ANDROID -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
     <uses-permission android:name="android.permission.BODY_SENSORS"/>
 
-    <!-- 🩺 HEALTH CONNECT — permissões essenciais usadas pelo app.
-         Versão Play Store segura: reduzida aos dados principais já usados na Megan. -->
+    <!-- 🩺 HEALTH CONNECT -->
     <uses-permission android:name="android.permission.health.READ_STEPS"/>
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
     <uses-permission android:name="android.permission.health.READ_SLEEP"/>
@@ -53,8 +47,7 @@
     <!-- 📷 CÂMERA / EXAMES -->
     <uses-permission android:name="android.permission.CAMERA"/>
 
-    <!-- 📁 ARQUIVOS / MÍDIA - Android 13+
-         Versão segura: sem MANAGE_EXTERNAL_STORAGE. -->
+    <!-- 📁 ARQUIVOS / MÍDIA - Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
@@ -84,10 +77,13 @@
             <data android:mimeType="text/plain"/>
         </intent>
 
-        <!-- Health Connect em Android 13 ou menor -->
-        <package android:name="com.google.android.apps.healthdata"/>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
 
-        <!-- Apps externos usados pela Megan -->
+        <package android:name="com.google.android.googlequicksearchbox"/>
+        <package android:name="com.samsung.android.bixby.agent"/>
+        <package android:name="com.google.android.apps.healthdata"/>
         <package android:name="com.whatsapp"/>
         <package android:name="com.whatsapp.w4b"/>
         <package android:name="org.telegram.messenger"/>
@@ -126,14 +122,11 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Health Connect: tela de explicação/uso de permissões. -->
             <intent-filter>
                 <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE"/>
             </intent-filter>
-
         </activity>
 
-        <!-- Health Connect Android 14+: link de uso de permissões. -->
         <activity-alias
             android:name="ViewPermissionUsageActivity"
             android:exported="true"
@@ -145,9 +138,7 @@
             </intent-filter>
         </activity-alias>
 
-
-        <!-- 🎙️ ACTIVITY TRANSPARENTE PARA ESCUTA NATIVA DE COMANDO
-             Necessária porque o Android bloqueia SpeechRecognizer direto no Service em muitos aparelhos. -->
+        <!-- Mantida registrada como fallback, mas o fluxo principal usa MeganPresenceService. -->
         <activity
             android:name=".MeganNativeSpeechActivity"
             android:exported="false"
@@ -159,21 +150,17 @@
             android:turnScreenOn="true"
             android:finishOnTaskLaunch="true"/>
 
-        <!-- ⏰ RECEIVER DE LEMBRETES -->
         <receiver
             android:name=".MeganReminderReceiver"
             android:enabled="true"
             android:exported="false"/>
 
-        <!-- 🔥 SERVIÇO FOREGROUND
-             Mantido como dataSync para preservar a estabilidade atual. -->
         <service
             android:name=".MeganPresenceService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone|dataSync"/>
 
-        <!-- 🔥 ACCESSIBILITY -->
         <service
             android:name=".MeganAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"

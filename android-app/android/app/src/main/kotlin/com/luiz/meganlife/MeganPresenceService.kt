@@ -9,9 +9,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -26,7 +23,6 @@ import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.concurrent.thread
 
 class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
 
@@ -37,9 +33,9 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         private const val CHANNEL_ID = "megan_presence_channel"
         private const val CHANNEL_NAME = "Megan escuta segura"
         private const val NOTIFICATION_ID = 6101
-        private const val WAKE_NOTIFICATION_ID = 6102
         private const val WAKE_CHANNEL_ID = "megan_wake_alert_channel"
         private const val WAKE_CHANNEL_NAME = "Megan Wake Alert"
+        private const val WAKE_NOTIFICATION_ID = 6102
         private const val WAKE_LOCK_TAG = "MeganLife:PresenceWakeLock"
 
         @Volatile
@@ -50,12 +46,8 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wakeThread: Thread? = null
     private var tts: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
-
-    @Volatile
-    private var wakeListening: Boolean = false
 
     @Volatile
     private var isListeningCommand: Boolean = false
@@ -63,9 +55,12 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
     @Volatile
     private var ttsReady: Boolean = false
 
+    @Volatile
+    private var awaitingCommandAfterWake: Boolean = false
+
+    private var commandWindowUntil: Long = 0L
+    private var lastRestartAt: Long = 0L
     private var lastWakeAt: Long = 0L
-    private var lastCommandAt: Long = 0L
-    private var lastNoCommandAt: Long = 0L
     private var lastPresenceNotificationAt: Long = 0L
 
     override fun onCreate() {
@@ -103,7 +98,6 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        stopNativeWakeListener()
         stopCommandRecognizer()
         releaseWakeLock()
 
@@ -140,23 +134,28 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun startPresence() {
-        if (isRunning && wakeListening) {
-            updateNotificationText("Presença ativa. Diga: ok Megan.", throttle = true)
+        if (isRunning && isListeningCommand) {
+            updateNotificationText("Presença ativa. Diga: ok Megan e o comando.", throttle = true)
             return
         }
 
         isRunning = true
+        awaitingCommandAfterWake = false
+        commandWindowUntil = 0L
         acquireWakeLockSafely()
+
         startForeground(
             NOTIFICATION_ID,
-            buildNotification("Presença ativa. Diga: ok Megan.")
+            buildNotification("Presença ativa. Diga: ok Megan e o comando.")
         )
-        startNativeWakeListener()
+
+        restartSpeechLoop(delayMs = 600L, force = true)
     }
 
     private fun stopPresence() {
         isRunning = false
-        stopNativeWakeListener()
+        awaitingCommandAfterWake = false
+        commandWindowUntil = 0L
         stopCommandRecognizer()
         releaseWakeLock()
         stopForegroundCompat()
@@ -189,127 +188,6 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun startNativeWakeListener() {
-        if (wakeListening || !isRunning) return
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            updateNotificationText("Microfone sem permissão. Ative para usar Ok Megan em segundo plano.")
-            return
-        }
-
-        wakeListening = true
-
-        wakeThread = thread(start = true, name = "MeganNativeWakeListener") {
-            var recorder: AudioRecord? = null
-
-            try {
-                val sampleRate = 16000
-                val minBuffer = AudioRecord.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                )
-
-                if (minBuffer <= 0) {
-                    updateNotificationText("Escuta nativa indisponível neste aparelho.")
-                    wakeListening = false
-                    return@thread
-                }
-
-                val bufferSize = minBuffer.coerceAtLeast(sampleRate / 3)
-
-                recorder = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize
-                )
-
-                val buffer = ShortArray(bufferSize)
-                recorder.startRecording()
-
-                var voiceFrames = 0
-                var silenceFrames = 0
-
-                while (wakeListening && isRunning) {
-                    if (isListeningCommand) {
-                        Thread.sleep(180)
-                        continue
-                    }
-
-                    val read = recorder.read(buffer, 0, buffer.size)
-                    if (read <= 0) continue
-
-                    var sum = 0.0
-                    var peak = 0
-
-                    for (i in 0 until read) {
-                        val value = buffer[i].toInt()
-                        val abs = kotlin.math.abs(value)
-                        if (abs > peak) peak = abs
-                        sum += (value * value).toDouble()
-                    }
-
-                    val rms = kotlin.math.sqrt(sum / read)
-
-                    // Ajuste anti-spam:
-                    // resposta ainda rápida, mas menos sensível para não acordar com qualquer ruído.
-                    val voiceDetected = rms > 1450.0 && peak > 5600
-
-                    if (voiceDetected) {
-                        voiceFrames++
-                        silenceFrames = 0
-                    } else {
-                        silenceFrames++
-                        if (silenceFrames > 5) {
-                            voiceFrames = 0
-                            silenceFrames = 0
-                        }
-                    }
-
-                    if (voiceFrames >= 4) {
-                        triggerMeganWake()
-                        voiceFrames = 0
-                        silenceFrames = 0
-                    }
-                }
-            } catch (_: Exception) {
-                if (isRunning) {
-                    updateNotificationText("Escuta nativa pausada. Toque para abrir a Megan.")
-                }
-            } finally {
-                try {
-                    recorder?.stop()
-                } catch (_: Exception) {
-                }
-
-                try {
-                    recorder?.release()
-                } catch (_: Exception) {
-                }
-
-                recorder = null
-                wakeListening = false
-            }
-        }
-    }
-
-    private fun stopNativeWakeListener() {
-        wakeListening = false
-
-        try {
-            val current = Thread.currentThread()
-            val threadToStop = wakeThread
-            if (threadToStop != null && threadToStop != current) {
-                threadToStop.interrupt()
-            }
-        } catch (_: Exception) {
-        } finally {
-            wakeThread = null
-        }
-    }
-
     private fun stopCommandRecognizer() {
         try {
             speechRecognizer?.cancel()
@@ -319,6 +197,410 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
             speechRecognizer = null
             isListeningCommand = false
         }
+    }
+
+    private fun restartSpeechLoop(delayMs: Long = 900L, force: Boolean = false) {
+        if (!isRunning) return
+
+        val now = System.currentTimeMillis()
+        if (!force && now - lastRestartAt < 450L) return
+        lastRestartAt = now
+
+        mainHandler.postDelayed({
+            if (!isRunning) return@postDelayed
+            startCommandListening()
+        }, delayMs)
+    }
+
+    private fun startCommandListening() {
+        mainHandler.post {
+            if (!isRunning) return@post
+
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                updateNotificationText("Microfone sem permissão. Ative para usar a presença da Megan.")
+                restartSpeechLoop(delayMs = 5000L, force = true)
+                return@post
+            }
+
+            try {
+                if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                    updateNotificationText("Reconhecimento de fala indisponível neste aparelho.", throttle = true)
+                    restartSpeechLoop(delayMs = 6000L, force = true)
+                    return@post
+                }
+
+                stopCommandRecognizer()
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+
+                val listenIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
+                    putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
+                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1900L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2500L)
+                }
+
+                speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        isListeningCommand = true
+
+                        if (awaitingCommandAfterWake || isCommandWindowOpen()) {
+                            awaitingCommandAfterWake = true
+                            updateNotificationText("Megan acordada. Fale seu comando agora.", throttle = true)
+                        } else {
+                            awaitingCommandAfterWake = false
+                            updateNotificationText("Presença ativa. Diga: ok Megan e o comando.", throttle = true)
+                        }
+                    }
+
+                    override fun onBeginningOfSpeech() {
+                        updateNotificationText("Ouvindo...", throttle = true)
+                    }
+
+                    override fun onRmsChanged(rmsdB: Float) {}
+
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+
+                    override fun onEndOfSpeech() {
+                        updateNotificationText("Processando comando.", throttle = true)
+                    }
+
+                    override fun onError(error: Int) {
+                        isListeningCommand = false
+
+                        when (error) {
+                            SpeechRecognizer.ERROR_NO_MATCH,
+                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                                if (awaitingCommandAfterWake || isCommandWindowOpen()) {
+                                    awaitingCommandAfterWake = true
+                                    updateNotificationText("Megan acordada. Fale seu comando agora.", throttle = true)
+                                    restartSpeechLoop(delayMs = 350L, force = true)
+                                } else {
+                                    awaitingCommandAfterWake = false
+                                    commandWindowUntil = 0L
+                                    updateNotificationText("Presença ativa. Diga: ok Megan e o comando.", throttle = true)
+                                    restartSpeechLoop(delayMs = 900L, force = true)
+                                }
+                            }
+
+                            SpeechRecognizer.ERROR_AUDIO -> {
+                                updateNotificationText("Microfone ocupado. Vou tentar novamente.", throttle = true)
+                                restartSpeechLoop(delayMs = if (awaitingCommandAfterWake || isCommandWindowOpen()) 700L else 2200L, force = true)
+                            }
+
+                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                                stopCommandRecognizer()
+                                updateNotificationText("Reconhecimento ocupado. Reiniciando escuta.", throttle = true)
+                                restartSpeechLoop(delayMs = if (awaitingCommandAfterWake || isCommandWindowOpen()) 700L else 1700L, force = true)
+                            }
+
+                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                                awaitingCommandAfterWake = false
+                                commandWindowUntil = 0L
+                                updateNotificationText("Permissão de microfone insuficiente.")
+                                restartSpeechLoop(delayMs = 5000L, force = true)
+                            }
+
+                            SpeechRecognizer.ERROR_NETWORK,
+                            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
+                                updateNotificationText("Reconhecimento de fala sem conexão agora.", throttle = true)
+                                restartSpeechLoop(delayMs = if (awaitingCommandAfterWake || isCommandWindowOpen()) 900L else 2500L, force = true)
+                            }
+
+                            else -> {
+                                updateNotificationText("Reiniciando escuta da Megan.", throttle = true)
+                                restartSpeechLoop(delayMs = if (awaitingCommandAfterWake || isCommandWindowOpen()) 700L else 1600L, force = true)
+                            }
+                        }
+                    }
+
+                    override fun onResults(results: Bundle?) {
+                        isListeningCommand = false
+
+                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        val command = selectBestCommand(matches)
+
+                        handleNativeCommand(command)
+                    }
+
+                    override fun onPartialResults(partialResults: Bundle?) {
+                        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        val partial = matches
+                            ?.firstOrNull()
+                            ?.trim()
+                            ?.lowercase(Locale("pt", "BR"))
+                            ?: ""
+
+                        if (!awaitingCommandAfterWake && !isCommandWindowOpen() && partial.isNotBlank() && looksLikeWakeCommand(partial)) {
+                            updateNotificationText("Megan acordada. Continue falando.", throttle = true)
+                        }
+                    }
+
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+
+                isListeningCommand = true
+                speechRecognizer?.startListening(listenIntent)
+            } catch (_: Exception) {
+                isListeningCommand = false
+                updateNotificationText("Não consegui iniciar a escuta. Tentando novamente.", throttle = true)
+                restartSpeechLoop(delayMs = if (awaitingCommandAfterWake || isCommandWindowOpen()) 700L else 2500L, force = true)
+            }
+        }
+    }
+
+    private fun selectBestCommand(matches: ArrayList<String>?): String {
+        val options = matches
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+
+        if (options.isEmpty()) return ""
+
+        val timeOption = options.firstOrNull { isTimeCommand(it) }
+        if (timeOption != null) return timeOption.lowercase(Locale("pt", "BR"))
+
+        val dateOption = options.firstOrNull { isDateCommand(it) }
+        if (dateOption != null) return dateOption.lowercase(Locale("pt", "BR"))
+
+        val wakeOption = options.firstOrNull { looksLikeWakeCommand(it) }
+        if (wakeOption != null) return wakeOption.lowercase(Locale("pt", "BR"))
+
+        return options.first().lowercase(Locale("pt", "BR"))
+    }
+
+    private fun handleNativeCommand(command: String) {
+        val clean = normalize(command)
+
+        if (clean.isBlank()) {
+            if (awaitingCommandAfterWake || isCommandWindowOpen()) {
+                awaitingCommandAfterWake = true
+                updateNotificationText("Megan acordada. Fale seu comando agora.", throttle = true)
+                restartSpeechLoop(delayMs = 350L, force = true)
+            } else {
+                awaitingCommandAfterWake = false
+                commandWindowUntil = 0L
+                updateNotificationText("Presença ativa. Diga: ok Megan e o comando.", throttle = true)
+                restartSpeechLoop(delayMs = 900L, force = true)
+            }
+            return
+        }
+
+        // Correção principal:
+        // Depois que "ok Megan" foi detectado, aceita o próximo texto como comando
+        // mesmo que o tempo da janela tenha oscilado entre callbacks do Android.
+        if (awaitingCommandAfterWake) {
+            awaitingCommandAfterWake = false
+            commandWindowUntil = 0L
+            handleRealCommand(clean)
+            return
+        }
+
+        if (isCommandWindowOpen()) {
+            awaitingCommandAfterWake = false
+            commandWindowUntil = 0L
+            handleRealCommand(clean)
+            return
+        }
+
+        if (!looksLikeWakeCommand(clean)) {
+            updateNotificationText("Presença ativa. Aguardando ok Megan.", throttle = true)
+            restartSpeechLoop(delayMs = 900L, force = true)
+            return
+        }
+
+        val realCommand = extractCommandAfterWake(clean)
+
+        if (realCommand.isBlank()) {
+            activateCommandWindow()
+            return
+        }
+
+        awaitingCommandAfterWake = false
+        commandWindowUntil = 0L
+        handleRealCommand(realCommand)
+    }
+
+    private fun isCommandWindowOpen(): Boolean {
+        return awaitingCommandAfterWake && System.currentTimeMillis() <= commandWindowUntil
+    }
+
+    private fun activateCommandWindow() {
+        val now = System.currentTimeMillis()
+
+        if (now - lastWakeAt < 1800L) return
+
+        lastWakeAt = now
+        awaitingCommandAfterWake = true
+        commandWindowUntil = now + 15000L
+        MainActivity.markNativeWakeDetected()
+
+        showWakeNotification()
+        updateNotificationText("Megan acordada. Fale seu comando agora.", throttle = true)
+        speakNative("Pode falar.")
+
+        stopCommandRecognizer()
+        restartSpeechLoop(delayMs = 550L, force = true)
+
+        mainHandler.postDelayed({
+            if (awaitingCommandAfterWake && System.currentTimeMillis() > commandWindowUntil) {
+                awaitingCommandAfterWake = false
+                commandWindowUntil = 0L
+                updateNotificationText("Presença ativa. Diga: ok Megan e o comando.", throttle = true)
+                restartSpeechLoop(delayMs = 900L, force = true)
+            }
+        }, 15500L)
+    }
+
+    private fun handleRealCommand(command: String) {
+        val realCommand = normalize(command)
+
+        if (realCommand.isBlank()) {
+            updateNotificationText("Comando vazio. Diga: ok Megan e fale o comando.", throttle = true)
+            restartSpeechLoop(delayMs = 900L, force = true)
+            return
+        }
+
+        MainActivity.markNativeWakeDetected()
+        updateNotificationText("Comando: $realCommand")
+
+        when {
+            isTimeCommand(realCommand) -> {
+                val time = SimpleDateFormat("HH:mm", Locale("pt", "BR")).format(Date())
+                speakNative("Agora são $time.")
+            }
+
+            isDateCommand(realCommand) -> {
+                val date = SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date())
+                speakNative("Hoje é $date.")
+            }
+
+            realCommand.contains("seu nome") ||
+                realCommand.contains("qual seu nome") ||
+                realCommand.contains("quem e voce") -> {
+                speakNative("Eu sou a Megan Life, sua assistente.")
+            }
+
+            realCommand.contains("teste") || realCommand.contains("funcionando") -> {
+                speakNative("Estou funcionando em segundo plano, Luiz.")
+            }
+
+            realCommand.contains("parar") ||
+                realCommand.contains("desativar presenca") ||
+                realCommand.contains("desliga presenca") -> {
+                speakNative("Tudo bem, Luiz. Vou desativar a presença segura.")
+                mainHandler.postDelayed({
+                    stopPresence()
+                }, 1400L)
+                return
+            }
+
+            realCommand.contains("abrir megan") ||
+                realCommand.contains("abre megan") ||
+                realCommand.contains("abrir o app") ||
+                realCommand.contains("abre o app") -> {
+                speakNative("Abrindo a Megan.")
+                openMainActivity()
+            }
+
+            else -> {
+                speakNative("Não entendi esse comando, Luiz. Pode repetir com poucas palavras.")
+            }
+        }
+
+        mainHandler.postDelayed({
+            if (isRunning) {
+                awaitingCommandAfterWake = false
+                commandWindowUntil = 0L
+                restartSpeechLoop(delayMs = 1200L, force = true)
+            }
+        }, 1700L)
+    }
+
+    private fun isTimeCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("hora") ||
+            command.contains("horas") ||
+            command.contains("horario") ||
+            command.contains("que ora") ||
+            command.contains("que oras") ||
+            command.contains("que horas sao") ||
+            command.contains("que hora e") ||
+            command.contains("que horas e") ||
+            command.contains("agora sao") ||
+            command.contains("sao que horas") ||
+            command == "agora"
+    }
+
+    private fun isDateCommand(text: String): Boolean {
+        val command = normalize(text)
+
+        return command.contains("data") ||
+            command.contains("dia e hoje") ||
+            command.contains("dia hoje") ||
+            command.contains("que dia e") ||
+            command.contains("que dia e hoje") ||
+            command.contains("qual e a data")
+    }
+
+    private fun looksLikeWakeCommand(text: String): Boolean {
+        val clean = normalize(text)
+        return clean.contains("ok megan") ||
+            clean.contains("oi megan") ||
+            clean.contains("ok mega") ||
+            clean.contains("oi mega") ||
+            clean == "megan" ||
+            clean.startsWith("megan ")
+    }
+
+    private fun extractCommandAfterWake(text: String): String {
+        var clean = normalize(text)
+
+        val wakeWords = listOf(
+            "ok megan",
+            "oi megan",
+            "ok mega",
+            "oi mega",
+            "megan"
+        )
+
+        for (wake in wakeWords) {
+            val index = clean.indexOf(wake)
+            if (index >= 0) {
+                clean = clean.substring(index + wake.length).trim()
+                break
+            }
+        }
+
+        return clean
+            .removePrefix(",")
+            .removePrefix(".")
+            .removePrefix("-")
+            .trim()
+    }
+
+    private fun normalize(text: String): String {
+        return text
+            .lowercase(Locale("pt", "BR"))
+            .replace("á", "a")
+            .replace("à", "a")
+            .replace("ã", "a")
+            .replace("â", "a")
+            .replace("é", "e")
+            .replace("ê", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ô", "o")
+            .replace("õ", "o")
+            .replace("ú", "u")
+            .replace("ç", "c")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun speakNative(text: String) {
@@ -340,184 +622,6 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun startCommandListening() {
-        mainHandler.post {
-            if (!isRunning) return@post
-
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                updateNotificationText("Microfone sem permissão.")
-                restartWakeAfterCommand()
-                return@post
-            }
-
-            try {
-                if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                    speakNative("Reconhecimento de fala indisponível neste aparelho.")
-                    restartWakeAfterCommand()
-                    return@post
-                }
-
-                if (isListeningCommand) {
-                    stopCommandRecognizer()
-                }
-
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-
-                val listenIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
-                    putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2500L)
-                }
-
-                speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        updateNotificationText("Megan ouvindo comando em segundo plano.")
-                    }
-
-                    override fun onBeginningOfSpeech() {
-                        updateNotificationText("Comando detectado. Continue falando.")
-                    }
-
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-
-                    override fun onEndOfSpeech() {
-                        updateNotificationText("Processando comando.")
-                    }
-
-                    override fun onError(error: Int) {
-                        isListeningCommand = false
-
-                        when (error) {
-                            SpeechRecognizer.ERROR_NO_MATCH,
-                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                                lastNoCommandAt = System.currentTimeMillis()
-                                updateNotificationText("Não ouvi comando claro. Diga: ok Megan e fale o comando.", throttle = true)
-                                // Não fala em voz alta para não criar loop de áudio e alerta.
-                            }
-
-                            SpeechRecognizer.ERROR_AUDIO -> {
-                                updateNotificationText("Tive problema com o áudio do microfone.", throttle = true)
-                            }
-
-                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                                speakNative("Permissão de microfone insuficiente.")
-                                updateNotificationText("Permissão de microfone insuficiente.")
-                            }
-
-                            SpeechRecognizer.ERROR_NETWORK,
-                            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                                updateNotificationText("Reconhecimento de fala sem conexão agora.", throttle = true)
-                            }
-
-                            else -> {
-                                updateNotificationText("Não consegui ouvir o comando agora.", throttle = true)
-                            }
-                        }
-
-                        restartWakeAfterCommand(extraDelayMs = 2200L)
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        isListeningCommand = false
-
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val command = matches
-                            ?.firstOrNull()
-                            ?.trim()
-                            ?.lowercase(Locale("pt", "BR"))
-                            ?: ""
-
-                        handleNativeCommand(command)
-                        restartWakeAfterCommand(extraDelayMs = 1400L)
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-
-                isListeningCommand = true
-                speechRecognizer?.startListening(listenIntent)
-            } catch (_: Exception) {
-                isListeningCommand = false
-                updateNotificationText("Não consegui iniciar a escuta do comando.", throttle = true)
-                restartWakeAfterCommand(extraDelayMs = 2200L)
-            }
-        }
-    }
-
-    private fun restartWakeAfterCommand(extraDelayMs: Long = 1200L) {
-        lastCommandAt = System.currentTimeMillis()
-
-        mainHandler.postDelayed({
-            stopCommandRecognizer()
-
-            if (isRunning && !wakeListening) {
-                startNativeWakeListener()
-            }
-
-            if (isRunning) {
-                updateNotificationText("Presença ativa. Diga: ok Megan.", throttle = true)
-            }
-        }, extraDelayMs)
-    }
-
-    private fun handleNativeCommand(command: String) {
-        val clean = command.trim().lowercase(Locale("pt", "BR"))
-
-        if (clean.isBlank()) {
-            lastNoCommandAt = System.currentTimeMillis()
-            updateNotificationText("Comando vazio. Diga: ok Megan e fale o comando.", throttle = true)
-            return
-        }
-
-        updateNotificationText("Comando: $clean")
-
-        when {
-            clean.contains("hora") || clean.contains("horas") -> {
-                val time = SimpleDateFormat("HH:mm", Locale("pt", "BR")).format(Date())
-                speakNative("Agora são $time.")
-            }
-
-            clean.contains("seu nome") ||
-                clean.contains("qual seu nome") ||
-                clean.contains("quem é você") ||
-                clean.contains("quem e voce") -> {
-                speakNative("Eu sou a Megan Life, sua assistente.")
-            }
-
-            clean.contains("teste") || clean.contains("funcionando") -> {
-                speakNative("Estou funcionando em segundo plano, Luiz.")
-            }
-
-            clean.contains("parar") ||
-                clean.contains("desativar presença") ||
-                clean.contains("desliga presença") -> {
-                speakNative("Tudo bem, Luiz. Vou desativar a presença segura.")
-                stopPresence()
-            }
-
-            clean.contains("abrir megan") ||
-                clean.contains("abre megan") ||
-                clean.contains("abrir o app") ||
-                clean.contains("abre o app") -> {
-                speakNative("Abrindo a Megan.")
-                openMainActivity()
-            }
-
-            else -> {
-                speakNative("Entendi você dizendo: $clean. Vou abrir a Megan para continuar com inteligência completa.")
-                openMainActivity()
-            }
-        }
-    }
-
     private fun openMainActivity() {
         try {
             MainActivity.markNativeWakeDetected()
@@ -534,30 +638,6 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
             showWakeNotification()
         }
-    }
-
-    private fun triggerMeganWake() {
-        val now = System.currentTimeMillis()
-
-        // Cooldown anti-spam: evita dezenas de alertas quando há ruído contínuo.
-        if (now - lastWakeAt < 7000L) return
-        if (now - lastCommandAt < 4200L) return
-        if (now - lastNoCommandAt < 5000L) return
-        if (isListeningCommand) return
-
-        lastWakeAt = now
-        MainActivity.markNativeWakeDetected()
-
-        showWakeNotification()
-        updateNotificationText("Megan acordada. Fale o comando agora.", throttle = true)
-
-        stopNativeWakeListener()
-
-        mainHandler.postDelayed({
-            if (isRunning) {
-                startCommandListening()
-            }
-        }, 320L)
     }
 
     private fun updateNotificationText(text: String, throttle: Boolean = false) {
@@ -580,7 +660,7 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
             CHANNEL_NAME,
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Mantém a presença segura da Megan Life com escuta nativa leve em foreground."
+            description = "Mantém a presença segura da Megan Life com reconhecimento de voz em foreground."
             setShowBadge(false)
         }
 
@@ -639,18 +719,13 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
 
     private fun showWakeNotification() {
         try {
-            val now = System.currentTimeMillis()
-            if (now - lastWakeAt < 700L) {
-                // Permite o primeiro alerta do wake atual, mas evita duplicações imediatas do Android.
-            }
-
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.notify(WAKE_NOTIFICATION_ID, buildWakeNotification())
         } catch (_: Exception) {
         }
     }
 
-    private fun buildNotification(text: String = "Presença ativa. Diga: ok Megan."): Notification {
+    private fun buildNotification(text: String = "Presença ativa. Diga: ok Megan e o comando."): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
