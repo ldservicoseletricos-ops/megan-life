@@ -1,21 +1,63 @@
 package com.luiz.meganlife
 
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
+import android.provider.AlarmClock
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity: FlutterActivity() {
 
+    companion object {
+        @Volatile
+        private var pendingNativeWakeDetected: Boolean = false
+
+        fun markNativeWakeDetected() {
+            pendingNativeWakeDetected = true
+        }
+
+        fun consumeNativeWakeDetected(): Boolean {
+            val value = pendingNativeWakeDetected
+            pendingNativeWakeDetected = false
+            return value
+        }
+    }
+
+
     private val CHANNEL = "megan.apps"
     private val ACCESS_CHANNEL = "megan.accessibility"
     private val PRESENCE_CHANNEL = "megan.presence"
     private val SYSTEM_CHANNEL = "megan.system"
+    private val REMINDER_CHANNEL = "megan.reminders"
+    private val ALARM_CHANNEL = "megan.alarm"
+    private val WAKE_EVENT_CHANNEL = "megan.wake_event"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        captureNativeWakeIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureNativeWakeIntent(intent)
+    }
+
+    private fun captureNativeWakeIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra("nativeWakeDetected", false) == true) {
+            markNativeWakeDetected()
+        }
+    }
+
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -173,5 +215,128 @@ class MainActivity: FlutterActivity() {
                     result.success(false)
                 }
             }
+
+
+        // ⏰ LEMBRETES / ALERTAS REAIS DO ANDROID
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, REMINDER_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "scheduleReminder" -> {
+                            val id = call.argument<Int>("id") ?: System.currentTimeMillis().toInt()
+                            val title = call.argument<String>("title") ?: "Megan Life"
+                            val body = call.argument<String>("body") ?: "Lembrete da Megan"
+                            val triggerMillis = call.argument<Long>("triggerMillis")
+                                ?: (call.argument<Int>("triggerMillis")?.toLong())
+
+                            if (triggerMillis == null) {
+                                result.success(false)
+                                return@setMethodCallHandler
+                            }
+
+                            val intent = Intent(this, MeganReminderReceiver::class.java).apply {
+                                putExtra("title", title)
+                                putExtra("body", body)
+                                putExtra("id", id)
+                            }
+
+                            val pendingIntent = PendingIntent.getBroadcast(
+                                this,
+                                id,
+                                intent,
+                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                            )
+
+                            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+                                alarmManager.setAndAllowWhileIdle(
+                                    AlarmManager.RTC_WAKEUP,
+                                    triggerMillis,
+                                    pendingIntent
+                                )
+                            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                alarmManager.setExactAndAllowWhileIdle(
+                                    AlarmManager.RTC_WAKEUP,
+                                    triggerMillis,
+                                    pendingIntent
+                                )
+                            } else {
+                                alarmManager.setExact(
+                                    AlarmManager.RTC_WAKEUP,
+                                    triggerMillis,
+                                    pendingIntent
+                                )
+                            }
+
+                            result.success(true)
+                        }
+
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    result.success(false)
+                }
+            }
+
+
+
+        // ⏰ DESPERTADOR REAL DO CELULAR
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ALARM_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "setAlarm" -> {
+                            val hour = call.argument<Int>("hour") ?: 7
+                            val minute = call.argument<Int>("minute") ?: 0
+                            val message = call.argument<String>("message") ?: "Alarme Megan"
+                            val skipUi = call.argument<Boolean>("skipUi") ?: true
+
+                            if (hour !in 0..23 || minute !in 0..59) {
+                                result.success(false)
+                                return@setMethodCallHandler
+                            }
+
+                            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                                putExtra(AlarmClock.EXTRA_HOUR, hour)
+                                putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                                putExtra(AlarmClock.EXTRA_MESSAGE, message)
+                                putExtra(AlarmClock.EXTRA_SKIP_UI, skipUi)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+
+                            if (intent.resolveActivity(packageManager) != null) {
+                                startActivity(intent)
+                                result.success(true)
+                            } else {
+                                result.success(false)
+                            }
+                        }
+
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    result.success(false)
+                }
+            }
+
+
+
+        // 🎙️ EVENTO NATIVO DE WAKE WORD / OPÇÃO A
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WAKE_EVENT_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "getAndClearNativeWake" -> {
+                            result.success(consumeNativeWakeDetected())
+                        }
+
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    result.success(false)
+                }
+            }
+
     }
 }

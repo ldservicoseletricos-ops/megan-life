@@ -18,6 +18,10 @@ import '../services/file_service.dart';
 import '../services/navigation_service.dart';
 import '../services/health_service.dart' as health;
 import '../services/fallback_health_service.dart' as fallback;
+import '../services/location_service.dart';
+import '../services/weather_service.dart';
+import '../services/reminder_service.dart';
+import '../services/alarm_service.dart';
 import '../core/agents/communication_agent.dart';
 import '../core/agents/navigation_agent.dart';
 import '../core/agents/app_agent.dart';
@@ -38,6 +42,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const MethodChannel _presenceChannel = MethodChannel('megan.presence');
   static const MethodChannel _systemChannel = MethodChannel('megan.system');
+  static const MethodChannel _wakeEventChannel = MethodChannel('megan.wake_event');
 
   final _controller = TextEditingController();
   final _ai = AiService();
@@ -55,6 +60,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _nav = NavigationService();
   final _health = health.MeganHealthService();
   final _fallbackHealth = fallback.FallbackHealthService();
+  final _location = LocationService();
+  final _weather = WeatherService();
+  final _reminders = ReminderService();
+  final _alarm = AlarmService();
   final _speech = SpeechToText();
   final _tts = FlutterTts();
   final _random = Random();
@@ -94,8 +103,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   DateTime? _speechBlockedUntil;
   DateTime? _microphoneRestartBlockedUntil;
   DateTime? _lastTtsFinishedAt;
+  DateTime? _lastNativeWakeResumeAt;
+  DateTime? _lastIgnoredAudioAt;
+  DateTime? _lastAcceptedAudioAt;
+
+  double _lastSoundLevel = 0;
+  int _lowConfidenceAudioHits = 0;
 
   String _lastSpokenByMegan = '';
+  String _lastIgnoredAudioText = '';
+  String _lastAcceptedAudioText = '';
+
+  bool _voiceTrainingMode = false;
+  bool _voiceProfileEnabled = false;
+  int _voiceTrainingIndex = 0;
+  final List<String> _voiceProfileSamples = [];
 
 
   String _lastVoiceText = '';
@@ -123,6 +145,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     'Pode mandar, Luiz.',
   ];
 
+  final List<String> _voiceTrainingPrompts = const [
+    'ok Megan',
+    'oi Megan',
+    'Megan abrir WhatsApp',
+    'Megan me leve para casa',
+    'Megan que horas são',
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -145,6 +175,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _startProactiveLoop();
     _boot();
     _checkPresenceStatus();
+    _handleNativeWakeEventIfNeeded();
   }
 
   @override
@@ -191,18 +222,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
 
     if (!inForeground) {
-      // 6.1.3 — Wake word background seguro:
-      // não reinicia microfone de forma agressiva quando o app sai da tela.
-      // A presença foreground continua viva pelo serviço Android, mas a escuta
-      // fica controlada para não interferir em mídia, WhatsApp, Telegram ou apps externos.
-      _restartTimer?.cancel();
+      // Presença em segundo plano/tela bloqueada:
+      // quando a presença está ativa, não paramos o reconhecimento de voz.
+      // O Android ainda pode limitar a escuta dependendo do fabricante/bateria,
+      // mas este fluxo preserva o microfone enquanto o serviço foreground está ativo.
       _commandWindowTimer?.cancel();
       _commandDebounceTimer?.cancel();
       _ttsResumeTimer?.cancel();
 
-      if (_presenceActive) {
-        _setVoiceStatus('Presença ativa em segundo plano. Wake word em modo seguro.');
+      if (_presenceActive && !_manualStop && !_mediaMode && !_communicationMode) {
+        _setVoiceStatus('Presença ativa em segundo plano. Escuta nativa leve em execução. Diga: ok Megan.');
+
+        _safeSetState(() {
+          _listening = true;
+          _backgroundWakeSafeMode = false;
+        });
+
+        _scheduleRestart(delayMs: 900);
+        return;
       }
+
+      _restartTimer?.cancel();
 
       try {
         if (_speech.isListening && !_processingVoiceCommand) {
@@ -214,6 +254,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     _backgroundWakeSafeMode = false;
+
+    _handleNativeWakeEventIfNeeded();
 
     // 6.1.4 FIX — Retorno seguro para a Megan:
     // quando a Megan abre um app externo, ela entra em modo mídia/comunicação
@@ -245,6 +287,61 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+
+
+  Future<void> _handleNativeWakeEventIfNeeded() async {
+    try {
+      final detected = await _wakeEventChannel.invokeMethod<bool>('getAndClearNativeWake');
+
+      if (detected == true) {
+        await _activateWakeFromBackground(force: true);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _activateWakeFromBackground({bool force = false}) async {
+    if (!mounted) return;
+
+    if (force && !_presenceActive) {
+      _safeSetState(() => _presenceActive = true);
+    }
+
+    if (!_presenceActive && !force) return;
+    if (_mediaMode || _communicationMode) return;
+    if (_manualStop) return;
+    if (_processingVoiceCommand || _startingListen) return;
+
+    final now = DateTime.now();
+    final last = _lastNativeWakeResumeAt;
+    if (last != null && now.difference(last).inSeconds < 4) return;
+    _lastNativeWakeResumeAt = now;
+
+    _commandWindowTimer?.cancel();
+    _commandDebounceTimer?.cancel();
+    _ttsResumeTimer?.cancel();
+    _conversationIdleTimer?.cancel();
+
+    _pendingCommand = '';
+    _wakeMessageShown = true;
+
+    _safeSetState(() {
+      _appInForeground = true;
+      _listening = true;
+      _manualStop = false;
+      _commandMode = true;
+      _backgroundWakeSafeMode = false;
+      _processingVoiceCommand = false;
+      _startingListen = false;
+    });
+
+    final answer = _randomFrom(_wakeReplies);
+    _setVoiceStatus('Megan acordada. Fale seu comando agora.');
+    _add(false, answer);
+
+    _scheduleConversationIdleClose();
+    _scheduleRestart(delayMs: 180);
+  }
+
   Future<void> _boot() async {
     await _setupTts();
 
@@ -261,10 +358,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
 
+    final savedVoiceSamples = prefs.getStringList('voiceProfileSamples') ?? <String>[];
+
     _safeSetState(() {
       _voiceReply = prefs.getBool('voiceReply') ?? true;
       _preferredNavigationApp = prefs.getString('preferredNavigationApp') ?? 'perguntar';
       _responseStyle = prefs.getString('responseStyle') ?? 'equilibrado';
+      _voiceProfileEnabled = prefs.getBool('voiceProfileEnabled') ?? savedVoiceSamples.isNotEmpty;
+      _voiceProfileSamples
+        ..clear()
+        ..addAll(savedVoiceSamples.where((sample) => sample.trim().isNotEmpty));
     });
 
     if (_speechReady) {
@@ -431,7 +534,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
 
       final answer = started == true
-          ? 'Presença segura ativada. Microfone pronto no app. Diga: ok Megan.'
+          ? 'Presença segura ativada. Vou tentar manter a escuta nativa leve também em segundo plano e com a tela bloqueada. Diga: ok Megan.'
           : 'Não consegui ativar a presença segura agora.';
 
       _setVoiceStatus(answer);
@@ -907,8 +1010,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           !_listening ||
           _processingVoiceCommand ||
           _startingListen ||
-          _backgroundWakeSafeMode ||
-          !_appInForeground ||
+          (_backgroundWakeSafeMode && !_presenceActive) ||
+          (!_appInForeground && !_presenceActive) ||
           _isMicrophoneRestartBlocked() ||
           _isSpeechBlockedByTts()) {
         return;
@@ -971,15 +1074,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _resumeListeningAfterTts() {
     _ttsResumeTimer?.cancel();
 
-    _ttsResumeTimer = Timer(const Duration(milliseconds: 1400), () {
+    _ttsResumeTimer = Timer(const Duration(milliseconds: 1200), () {
       if (!mounted ||
           _mediaMode ||
-          _communicationMode ||
           _manualStop ||
-          !_listening ||
-          _processingVoiceCommand ||
-          _backgroundWakeSafeMode ||
-          !_appInForeground) {
+          (_backgroundWakeSafeMode && !_presenceActive) ||
+          (!_appInForeground && !_presenceActive)) {
+        return;
+      }
+
+      // Libera flags que podem ficar presas depois da Megan falar.
+      _processingVoiceCommand = false;
+      _startingListen = false;
+
+      // No ciclo de conversa da Megan, o modo comunicação não deve impedir
+      // a retomada ouvir → responder → ouvir. Ele só pausa quando um app externo
+      // de comunicação foi realmente aberto e _manualStop fica ativo.
+      if (_communicationMode && !_commandMode) {
         return;
       }
 
@@ -989,7 +1100,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
 
       _pendingCommand = '';
-      _scheduleRestart(delayMs: 400);
+      _commandMode = true;
+      _wakeMessageShown = true;
+
+      if (!_listening) {
+        _safeSetState(() => _listening = true);
+      }
+
+      _setVoiceStatus('Pode falar, Luiz...');
+      _scheduleRestart(delayMs: 350);
     });
   }
 
@@ -1840,6 +1959,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return 'Luiz, esse comando ficou ambíguo. Me diga exatamente o que você quer que eu faça para eu executar com segurança.';
   }
 
+  bool _isUnsafeAiActionValue(String value) {
+    final normalized = _normalize(value);
+    if (normalized.isEmpty) return true;
+
+    return normalized.contains('contexto recente') ||
+        normalized.contains('mensagem atual') ||
+        normalized.contains('conversa recente') ||
+        normalized.contains('luiz business') ||
+        normalized.contains('megan abrindo whatsapp') ||
+        normalized.startsWith('luiz ') && normalized.contains(' megan ');
+  }
+
   String _cleanMeganOutput(String text) {
     var clean = text;
 
@@ -1944,6 +2075,84 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
 
+  bool _isAlarmCommand(String text) {
+    final command = _normalize(text);
+
+    return command.contains('despertador') ||
+        command.contains('alarme') ||
+        command.contains('me acorde') ||
+        command.contains('me acorda') ||
+        command.contains('acorde me') ||
+        command.contains('acorda me') ||
+        command.contains('me desperte') ||
+        command.contains('me desperta') ||
+        command.contains('definir alarme') ||
+        command.contains('defina alarme') ||
+        command.contains('criar alarme') ||
+        command.contains('crie alarme') ||
+        command.contains('ativar despertador') ||
+        command.contains('ative despertador');
+  }
+
+  Future<bool> _tryHandleAlarmCommand(String text) async {
+    if (!_isAlarmCommand(text)) return false;
+
+    final command = _normalize(text);
+    final wantsScreen = command.contains('abrir tela') ||
+        command.contains('com tela') ||
+        command.contains('mostrar tela') ||
+        command.contains('abrindo tela');
+
+    final answer = wantsScreen
+        ? await _alarm.setFromTextWithScreen(text)
+        : await _alarm.setFromText(text);
+
+    _add(false, answer);
+    _rememberConversation(text.trim(), answer);
+    await _say(answer);
+    return true;
+  }
+
+  bool _isReminderCommand(String text) {
+    final command = _normalize(text);
+
+    return command.contains('lembrete') ||
+        command.startsWith('me lembre') ||
+        command.startsWith('me lembra') ||
+        command.startsWith('lembre de') ||
+        command.startsWith('lembra de') ||
+        command.startsWith('me avise') ||
+        command.startsWith('avise') ||
+        command.startsWith('avisar') ||
+        command.startsWith('crie um lembrete') ||
+        command.startsWith('criar lembrete') ||
+        command.startsWith('gere um lembrete') ||
+        command.startsWith('gerar lembrete');
+  }
+
+  Future<bool> _tryHandleReminderCommand(String text) async {
+    if (!_isReminderCommand(text)) return false;
+
+    if (Platform.isAndroid) {
+      final notificationStatus = await Permission.notification.request();
+      if (!notificationStatus.isGranted) {
+        const answer = 'Luiz, para eu gerar alerta real de lembrete, preciso da permissão de notificações da Megan Life.';
+        _add(false, answer);
+        _rememberConversation(text.trim(), answer);
+        await _say(answer);
+        return true;
+      }
+    }
+
+    final result = await _reminders.scheduleFromText(text);
+    final answer = result.message;
+
+    _add(false, answer);
+    _rememberConversation(text.trim(), answer);
+    await _say(answer);
+    return true;
+  }
+
   bool _isHealthCommand(String text) {
     final command = _normalize(text);
 
@@ -1984,6 +2193,191 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _rememberConversation(text.trim(), answer);
     await _say(answer);
     return true;
+  }
+
+  bool _isLocationCommand(String text) {
+    final command = _normalize(text);
+
+    return command == 'onde estou' ||
+        command == 'onde eu estou' ||
+        command == 'qual minha localizacao' ||
+        command == 'qual minha localização' ||
+        command == 'minha localizacao' ||
+        command == 'minha localização' ||
+        command == 'me diga onde estou' ||
+        command == 'me fala onde estou' ||
+        command == 'em que cidade estou' ||
+        command == 'que cidade estou' ||
+        command == 'qual cidade estou' ||
+        command == 'qual e minha cidade' ||
+        command == 'qual é minha cidade';
+  }
+
+  Future<bool> _tryHandleLocationCommand(String text) async {
+    if (!_isLocationCommand(text)) return false;
+
+    try {
+      final locationResult = await _location.getCurrentLocation();
+
+      if (!locationResult.ok || locationResult.position == null) {
+        final answer = locationResult.message.isNotEmpty
+            ? locationResult.message
+            : 'Luiz, não consegui identificar sua localização agora. Confira se o GPS está ligado e se a Megan Life tem permissão de localização durante o uso.';
+        _add(false, answer);
+        _rememberConversation(text.trim(), answer);
+        await _say(answer);
+        return true;
+      }
+
+      final position = locationResult.position!;
+      String locationName = 'sua região';
+
+      try {
+        final weather = await _weather.getCurrentWeather(
+          latitude: position.latitude,
+          longitude: position.longitude,
+        );
+
+        final city = weather.city?.trim();
+        if (weather.ok && city != null && city.isNotEmpty) {
+          locationName = city;
+        }
+      } catch (_) {}
+
+      final parts = <String>[
+        locationName == 'sua região'
+            ? 'Luiz, consegui identificar sua localização aproximada neste celular.'
+            : 'Luiz, você está em $locationName.',
+        'Local aproximado detectado com sucesso pelo GPS do aparelho.',
+      ];
+
+      final accuracy = position.accuracy;
+      if (accuracy != null && accuracy > 0) {
+        parts.add('Precisão aproximada: ${accuracy.toStringAsFixed(0)} metros.');
+      }
+
+      final answer = _applyResponseStyle(_humanizeChatAnswer(parts.join(' ')));
+
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    } catch (e) {
+      final answer = 'Luiz, tive um problema ao verificar sua localização agora: $e';
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    }
+  }
+
+  bool _isWeatherCommand(String text) {
+    final command = _normalize(text);
+
+    if (command.contains('quanto tempo') ||
+        command.contains('faz quanto tempo') ||
+        command.contains('tempo de uso')) {
+      return false;
+    }
+
+    return command.contains('clima') ||
+        command.contains('temperatura') ||
+        command.contains('previsao do tempo') ||
+        command.contains('previsao') ||
+        command.contains('previsão') ||
+        command.contains('vai chover') ||
+        command.contains('chuva') ||
+        command.contains('tempo agora') ||
+        command.contains('tempo hoje') ||
+        command.contains('como esta o tempo') ||
+        command.contains('como está o tempo') ||
+        command.contains('como esta o clima') ||
+        command.contains('como está o clima');
+  }
+
+  Future<bool> _tryHandleWeatherCommand(String text) async {
+    if (!_isWeatherCommand(text)) return false;
+
+    try {
+      final locationResult = await _location.getCurrentLocation();
+
+      if (!locationResult.ok || locationResult.position == null) {
+        final answer = locationResult.message.isNotEmpty
+            ? locationResult.message
+            : 'Luiz, não consegui acessar a localização do celular agora. Confira se o GPS e a permissão de localização estão ativados.';
+        _add(false, answer);
+        _rememberConversation(text.trim(), answer);
+        await _say(answer);
+        return true;
+      }
+
+      final position = locationResult.position!;
+      final weather = await _weather.getCurrentWeather(
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+
+      if (!weather.ok) {
+        final answer = weather.message.isNotEmpty
+            ? weather.message
+            : 'Luiz, consegui acessar sua localização, mas não consegui obter o clima agora.';
+        _add(false, answer);
+        _rememberConversation(text.trim(), answer);
+        await _say(answer);
+        return true;
+      }
+
+      final answer = _applyResponseStyle(_humanizeChatAnswer(
+        _buildWeatherGuidance(weather, position),
+      ));
+
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    } catch (e) {
+      final answer = 'Luiz, tive um problema ao buscar localização e clima agora: $e';
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    }
+  }
+
+  String _buildWeatherGuidance(WeatherResult weather, MeganPosition position) {
+    final parts = <String>[];
+
+    parts.add('Luiz, usei a localização atual deste celular para consultar o clima agora.');
+
+    final metrics = <String>[];
+    if (weather.temperatureC != null) metrics.add('${weather.temperatureC!.toStringAsFixed(1)}°C');
+    if (weather.apparentTemperatureC != null) metrics.add('sensação de ${weather.apparentTemperatureC!.toStringAsFixed(1)}°C');
+    if (weather.humidityPercent != null) metrics.add('umidade ${weather.humidityPercent!.round()}%');
+    if (weather.windSpeedKmh != null) metrics.add('vento ${weather.windSpeedKmh!.toStringAsFixed(1)} km/h');
+    if (weather.precipitationMm != null && weather.precipitationMm! > 0) {
+      metrics.add('chuva ${weather.precipitationMm!.toStringAsFixed(1)} mm');
+    }
+
+    if (weather.description.isNotEmpty) {
+      parts.add('Condição: ${weather.description}.');
+    }
+
+    if (metrics.isNotEmpty) {
+      parts.add('Resumo: ${metrics.join(', ')}.');
+    }
+
+    if (weather.precipitationMm != null && weather.precipitationMm! > 0) {
+      parts.add('Pode ser melhor levar guarda-chuva ou evitar sair sem proteção.');
+    } else if (weather.weatherCode != null && WeatherService.isRainCode(weather.weatherCode!)) {
+      parts.add('Há sinal de chuva na condição atual, então vale se preparar antes de sair.');
+    }
+
+    final city = weather.city?.trim();
+    if (city != null && city.isNotEmpty && city != 'sua região') {
+      parts.add('Local: $city.');
+    }
+
+    return parts.join(' ');
   }
 
   String _buildHealthGuidance(Map<String, dynamic> data, {required bool athleteMode}) {
@@ -2329,12 +2723,38 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
 
     final cleanText = text.trim();
 
+    if (_isVoiceTrainingCommand(cleanText)) {
+      _controller.clear();
+      await _startVoiceTraining();
+      return;
+    }
+
+    if (_normalize(cleanText).contains('apagar perfil de voz') ||
+        _normalize(cleanText).contains('limpar perfil de voz') ||
+        _normalize(cleanText).contains('resetar perfil de voz')) {
+      _controller.clear();
+      await _clearVoiceTrainingProfile();
+      return;
+    }
+
     // Wake word isolada não pode ser enviada para agentes nem abrir app.
     // Ela apenas inicia/renova o modo conversa da Megan.
     if (_isWakeOnlyCommand(cleanText)) {
       _controller.clear();
       _pendingCommand = '';
       await _enterCommandMode();
+      return;
+    }
+
+    if (fromVoice && _isIsolatedVoiceFillerCommand(cleanText)) {
+      _controller.clear();
+      _pendingCommand = '';
+      _rememberIgnoredAudio(cleanText);
+      _setVoiceStatus('Escutando. Fale um comando completo, Luiz.');
+      if (_commandMode && !_manualStop && !_mediaMode && mounted) {
+        _resetConversationIdleClose();
+        _scheduleRestart(delayMs: 450);
+      }
       return;
     }
 
@@ -2387,6 +2807,12 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       // que palavras como relógio, passos ou treino sejam confundidas com chat genérico.
       final handledByHealth = await _tryHandleHealthCommand(cleanText);
       if (handledByHealth) return;
+
+      // 📍🌤 Localização + clima real do celular.
+      // Entra antes de apps/chat para responder comandos como clima, temperatura e chuva
+      // usando GPS real do aparelho, sem alterar os demais fluxos.
+      final handledByWeather = await _tryHandleWeatherCommand(cleanText);
+      if (handledByWeather) return;
 
       // 💬 6.0.1.3 — Modo comunicação protegida.
       // Apps de comunicação não entram no modo mídia universal para preservar áudio de mensagens.
@@ -2577,6 +3003,27 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       );
 
       if (executedMulti) {
+        if (_pendingWhatsAppChoice != null) {
+          _manualStop = false;
+          _mediaMode = false;
+          _communicationMode = false;
+          _processingVoiceCommand = false;
+          _startingListen = false;
+          _commandMode = true;
+          _wakeMessageShown = true;
+          if (mounted) {
+            _safeSetState(() {
+              _listening = true;
+              _processingVoiceCommand = false;
+              _startingListen = false;
+            });
+          }
+          _setVoiceStatus('Diga: normal ou Business.');
+          _scheduleConversationIdleClose();
+          _scheduleRestart(delayMs: 450);
+          return;
+        }
+
         if (_isCommunicationAppCommand(cleanText)) {
           await _enterCommunicationMode(sourceCommand: cleanText);
         } else if (_isMediaCommand(cleanText) || _isExternalAppCommand(cleanText)) {
@@ -2604,6 +3051,27 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       );
 
       if (executedByDecisionAgent) {
+        if (_pendingWhatsAppChoice != null) {
+          _manualStop = false;
+          _mediaMode = false;
+          _communicationMode = false;
+          _processingVoiceCommand = false;
+          _startingListen = false;
+          _commandMode = true;
+          _wakeMessageShown = true;
+          if (mounted) {
+            _safeSetState(() {
+              _listening = true;
+              _processingVoiceCommand = false;
+              _startingListen = false;
+            });
+          }
+          _setVoiceStatus('Diga: normal ou Business.');
+          _scheduleConversationIdleClose();
+          _scheduleRestart(delayMs: 450);
+          return;
+        }
+
         if (_isCommunicationAppCommand(cleanText)) {
           await _enterCommunicationMode(sourceCommand: cleanText);
         } else if (_isMediaCommand(cleanText) || _isExternalAppCommand(cleanText)) {
@@ -2615,6 +3083,32 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       // 🔒 Fallback antigo preservado: WhatsApp, banco, contexto e demais ações.
       final handledBySmartIntent = await _tryHandleSmartIntent(cleanText);
       if (handledBySmartIntent) {
+        // Correção do WhatsApp:
+        // quando a Megan pergunta "normal ou Business?", ela precisa continuar ouvindo.
+        // Antes, esse bloco entrava em modo comunicação e pausava o microfone.
+        if (_pendingWhatsAppChoice != null) {
+          _manualStop = false;
+          _mediaMode = false;
+          _communicationMode = false;
+          _processingVoiceCommand = false;
+          _startingListen = false;
+          _commandMode = true;
+          _wakeMessageShown = true;
+
+          if (mounted) {
+            _safeSetState(() {
+              _listening = true;
+              _processingVoiceCommand = false;
+              _startingListen = false;
+            });
+          }
+
+          _setVoiceStatus('Diga: normal ou Business.');
+          _scheduleConversationIdleClose();
+          _scheduleRestart(delayMs: 450);
+          return;
+        }
+
         if (_isCommunicationAppCommand(cleanText)) {
           await _enterCommunicationMode(sourceCommand: cleanText);
         } else if (_isMediaCommand(cleanText) || _isExternalAppCommand(cleanText)) {
@@ -2631,13 +3125,23 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
         return;
       }
 
+      final handledByAlarm = await _tryHandleAlarmCommand(cleanText);
+      if (handledByAlarm) return;
+
+      final handledByReminder = await _tryHandleReminderCommand(cleanText);
+      if (handledByReminder) return;
+
       final handledBySystem = await _runDirectSystemCommand(cleanText);
       if (handledBySystem) return;
+
+      final handledByLocation = await _tryHandleLocationCommand(cleanText);
+      if (handledByLocation) return;
 
       final contextualText = _contextAgent.buildContext(
         currentText: cleanText,
         memory: _shortMemory,
       );
+
       final result = await _ai.process(contextualText);
 
       final List<dynamic> actions = result['actions'] is List
@@ -2713,7 +3217,13 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
             await _runSystemAction(value);
             await Future.delayed(const Duration(milliseconds: 500));
           } else if (type == 'open_app') {
-            if (value.isEmpty) continue;
+            if (value.isEmpty || _isUnsafeAiActionValue(value)) {
+              final answer = 'Luiz, eu detectei uma ação insegura gerada a partir do contexto e bloqueei para evitar repetição automática.';
+              _add(false, answer);
+              _rememberConversation(cleanText, answer);
+              await _say(answer);
+              continue;
+            }
 
             final opened = await _apps.openKnownApp(value);
 
@@ -2731,7 +3241,13 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
 
             await Future.delayed(const Duration(milliseconds: 900));
           } else if (type == 'navigate') {
-            if (value.isEmpty) continue;
+            if (value.isEmpty || _isUnsafeAiActionValue(value)) {
+              final answer = 'Luiz, eu bloqueei uma navegação gerada a partir de contexto antigo para não executar algo errado.';
+              _add(false, answer);
+              _rememberConversation(cleanText, answer);
+              await _say(answer);
+              continue;
+            }
 
             await _nav.openNavigationChoice(context, value);
 
@@ -2860,6 +3376,11 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       return;
     }
 
+    if (_communicationMode) {
+      await _exitCommunicationMode();
+      return;
+    }
+
     if (_listening) {
       _manualStop = true;
       _restartTimer?.cancel();
@@ -2915,7 +3436,7 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
 
   Future<void> _startListening() async {
     if (_mediaMode ||
-        _communicationMode ||
+        (_communicationMode && !_commandMode) ||
         _backgroundWakeSafeMode ||
         !_appInForeground ||
         !_speechReady ||
@@ -2959,6 +3480,7 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
             ? const Duration(seconds: 8)
             : const Duration(seconds: 6),
         cancelOnError: false,
+        onSoundLevelChange: _handleSoundLevelChange,
         onResult: _handleSpeechResult,
       );
     } catch (e) {
@@ -2972,32 +3494,54 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     }
   }
 
+  void _handleSoundLevelChange(double level) {
+    _lastSoundLevel = level;
+
+    // Observação: o nível de som varia muito por aparelho Android.
+    // Por isso ele é usado como sinal auxiliar, nunca como bloqueio absoluto.
+    if (level <= 0.8) {
+      _lowConfidenceAudioHits++;
+    } else {
+      _lowConfidenceAudioHits = 0;
+    }
+  }
+
   void _handleSpeechResult(dynamic result) {
     final words = (result.recognizedWords ?? '').toString().trim();
     if (words.isEmpty) return;
 
     final bool isFinal = result.finalResult == true;
 
-    if (_mediaMode || _communicationMode || _backgroundWakeSafeMode || !_appInForeground) {
+    if (_mediaMode || (_communicationMode && !_commandMode) || _backgroundWakeSafeMode || !_appInForeground) {
       return;
     }
 
     if (_processingVoiceCommand ||
         _isMicrophoneRestartBlocked() ||
         _isSpeechBlockedByTts() ||
-        _looksLikeMeganEcho(words)) {
+        _shouldIgnoreRecognizedAudio(words, isFinal: isFinal)) {
       return;
     }
 
-    _setVoiceStatus('Ouvi: $words');
+    if (_voiceTrainingMode) {
+      _handleVoiceTrainingResult(words, isFinal: isFinal);
+      return;
+    }
 
     if (!_commandMode) {
       final wakeResult = _detectWakeWord(words);
-      if (!wakeResult.detected) return;
+
+      if (!wakeResult.detected || !_isWakeDetectionReliable(words, wakeResult, isFinal: isFinal)) {
+        _rememberIgnoredAudio(words);
+        return;
+      }
+
+      _rememberAcceptedAudio(words);
+      _setVoiceStatus('Wake word detectado: ok Megan.');
 
       final commandAfterWake = wakeResult.command.trim();
 
-      if (commandAfterWake.isNotEmpty && commandAfterWake.length >= 3) {
+      if (commandAfterWake.isNotEmpty && _isVoiceCommandReliable(commandAfterWake, isFinal: isFinal)) {
         _runCommandDebounced(commandAfterWake, fast: true);
         return;
       }
@@ -3009,9 +3553,208 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     _resetConversationIdleClose();
 
     final command = _extractWakeCommand(words).trim();
-    if (command.isEmpty || command.length < 3) return;
 
+    // Wake word repetida durante a conversa apenas renova a escuta.
+    // Não entra no chat e não vai para a IA.
+    if (_isWakeOnlyCommand(words) || _isWakeOnlyCommand(command)) {
+      _enterCommandMode();
+      return;
+    }
+
+    if (!_isVoiceCommandReliable(command, isFinal: isFinal)) return;
+
+    _rememberAcceptedAudio(command);
+    _setVoiceStatus('Comando capturado: $command');
     _runCommandDebounced(command, fast: isFinal);
+  }
+
+  bool _shouldIgnoreRecognizedAudio(String text, {required bool isFinal}) {
+    final normalized = _normalize(text);
+    if (normalized.isEmpty) return true;
+
+    if (_looksLikeMeganEcho(text)) {
+      _rememberIgnoredAudio(text);
+      return true;
+    }
+
+    if (_looksLikeAudioNoiseText(normalized)) {
+      _rememberIgnoredAudio(text);
+      return true;
+    }
+
+    final now = DateTime.now();
+
+    if (_lastIgnoredAudioText == normalized &&
+        _lastIgnoredAudioAt != null &&
+        now.difference(_lastIgnoredAudioAt!).inMilliseconds < 1400) {
+      return true;
+    }
+
+    if (_lastAcceptedAudioText == normalized &&
+        _lastAcceptedAudioAt != null &&
+        now.difference(_lastAcceptedAudioAt!).inMilliseconds < 850) {
+      return true;
+    }
+
+    // Parcial muito longo fora do modo comando costuma vir de música, TV ou fala ambiente.
+    if (!_commandMode && !isFinal && normalized.length > 90) {
+      _rememberIgnoredAudio(text);
+      return true;
+    }
+
+    return false;
+  }
+
+  bool _looksLikeAudioNoiseText(String normalized) {
+    if (normalized.isEmpty) return true;
+
+    final words = normalized.split(' ').where((word) => word.trim().isNotEmpty).toList();
+    if (words.isEmpty) return true;
+
+    // Evita ativação por letras repetidas de música/TV: "la la la", "oh oh oh", etc.
+    final repeatedShortWords = <String, int>{};
+    for (final word in words) {
+      if (word.length <= 3) {
+        repeatedShortWords[word] = (repeatedShortWords[word] ?? 0) + 1;
+      }
+    }
+
+    if (repeatedShortWords.values.any((count) => count >= 4)) return true;
+
+    // Muitas palavras muito curtas em sequência têm baixa chance de ser comando útil.
+    if (words.length >= 7) {
+      final shortCount = words.where((word) => word.length <= 2).length;
+      if ((shortCount / words.length) >= 0.65) return true;
+    }
+
+    // Resultados sem intenção clara, muito curtos e fora do modo comando não devem acordar a Megan.
+    if (!_commandMode && words.length == 1 && !_wordClose(words.first, 'megan')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  bool _isWakeDetectionReliable(String text, _WakeResult wake, {required bool isFinal}) {
+    if (!wake.detected) return false;
+
+    final normalized = _normalize(text);
+    final words = normalized.split(' ').where((word) => word.trim().isNotEmpty).toList();
+    if (words.isEmpty) return false;
+
+    final hasExplicitWakePair = RegExp(
+      r'\b(ok|okay|okey|oi|ola|e)\s+megan\b',
+      caseSensitive: false,
+    ).hasMatch(normalized);
+
+    if (hasExplicitWakePair) return true;
+
+    // Aceita "Megan" sozinha apenas como resultado final e bem curto.
+    // Isso reduz disparo falso por música/ruído onde aparece uma palavra parecida.
+    if (isFinal && words.length <= 2 && words.any((word) => _wordClose(word, 'megan'))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  bool _isVoiceCommandReliable(String command, {required bool isFinal}) {
+    final normalized = _normalize(command);
+    if (normalized.length < 3) return false;
+
+    if (_looksLikeMeganEcho(normalized)) {
+      _rememberIgnoredAudio(command);
+      return false;
+    }
+
+    if (_looksLikeAudioNoiseText(normalized)) {
+      _rememberIgnoredAudio(command);
+      return false;
+    }
+
+    final words = normalized.split(' ').where((word) => word.trim().isNotEmpty).toList();
+
+    // Evita processar uma fala parcial longa demais antes do STT finalizar.
+    if (!isFinal && words.length > 16) return false;
+
+    // Evita disparo por fragmento de áudio ambiente muito curto.
+    // Respostas curtas como "sim", "não" e "ok" só são aceitas quando
+    // existe uma confirmação real pendente. Fora disso, eram enviadas para a IA
+    // em loop e geravam respostas repetidas como "Não entendi".
+    final isAllowedShortReply = _hasPendingShortVoiceReplyContext(normalized);
+
+    if (words.length == 1 && normalized.length < 4 && !isAllowedShortReply) {
+      _rememberIgnoredAudio(command);
+      return false;
+    }
+
+    return true;
+  }
+
+  bool _hasPendingShortVoiceReplyContext(String normalized) {
+    final command = _normalize(normalized);
+    if (command.isEmpty) return false;
+
+    final isShortConfirmation = command == 'sim' ||
+        command == 'nao' ||
+        command == 'não' ||
+        command == 'ok' ||
+        command == 'certo' ||
+        command == 'cancelar' ||
+        command == 'cancela';
+
+    if (_waitingAutonomyConfirm && isShortConfirmation) return true;
+
+    if (_pendingAutonomyPlan != null && isShortConfirmation) return true;
+
+    if (_pendingWhatsAppChoice != null) {
+      return command == 'normal' ||
+          command == 'business' ||
+          command == 'comercial' ||
+          command == 'empresa' ||
+          command == 'whatsapp normal' ||
+          command == 'whatsapp business' ||
+          command == 'sim' ||
+          command == 'nao' ||
+          command == 'não' ||
+          command == 'cancelar' ||
+          command == 'cancela';
+    }
+
+    return false;
+  }
+
+  bool _isIsolatedVoiceFillerCommand(String text) {
+    final command = _normalize(text);
+    if (command.isEmpty) return true;
+
+    if (_hasPendingShortVoiceReplyContext(command)) return false;
+
+    return command == 'sim' ||
+        command == 'nao' ||
+        command == 'não' ||
+        command == 'ok' ||
+        command == 'certo' ||
+        command == 'ta' ||
+        command == 'tá' ||
+        command == 'hum' ||
+        command == 'aham';
+  }
+
+  void _rememberIgnoredAudio(String text) {
+    final normalized = _normalize(text);
+    if (normalized.isEmpty) return;
+
+    _lastIgnoredAudioText = normalized;
+    _lastIgnoredAudioAt = DateTime.now();
+  }
+
+  void _rememberAcceptedAudio(String text) {
+    final normalized = _normalize(text);
+    if (normalized.isEmpty) return;
+
+    _lastAcceptedAudioText = normalized;
+    _lastAcceptedAudioAt = DateTime.now();
   }
 
   Future<void> _enterCommandMode() async {
@@ -3057,6 +3800,12 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     }
 
     final cleanCommand = _extractWakeCommand(command).trim();
+
+    if (cleanCommand.isEmpty || _isWakeOnlyCommand(cleanCommand)) {
+      _enterCommandMode();
+      return;
+    }
+
     if (cleanCommand.length < 3) return;
 
     _conversationIdleTimer?.cancel();
@@ -3079,11 +3828,267 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     );
   }
 
+  bool _isVoiceTrainingCommand(String text) {
+    final command = _normalize(text);
+
+    return command.contains('treinar minha voz') ||
+        command.contains('treinar voz') ||
+        command.contains('registrar minha voz') ||
+        command.contains('registrar voz') ||
+        command.contains('aprender minha voz') ||
+        command.contains('aprender meu jeito de falar') ||
+        command.contains('perfil de voz');
+  }
+
+  Future<void> _startVoiceTraining() async {
+    if (!mounted) return;
+
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      const answer = 'Luiz, para treinar sua voz eu preciso da permissão do microfone.';
+      _add(false, answer);
+      await _say(answer);
+      return;
+    }
+
+    if (!_speechReady) {
+      _speechReady = await _initializeSpeech();
+    }
+
+    if (!_speechReady) {
+      const answer = 'Luiz, não consegui iniciar o reconhecimento de voz para o treinamento.';
+      _add(false, answer);
+      await _say(answer);
+      return;
+    }
+
+    _restartTimer?.cancel();
+    _commandWindowTimer?.cancel();
+    _commandDebounceTimer?.cancel();
+    _conversationIdleTimer?.cancel();
+
+    try {
+      if (_speech.isListening) {
+        await _speech.stop();
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+    } catch (_) {}
+
+    _safeSetState(() {
+      _voiceTrainingMode = true;
+      _voiceProfileEnabled = true;
+      _voiceTrainingIndex = 0;
+      _listening = true;
+      _manualStop = false;
+      _commandMode = false;
+      _wakeMessageShown = false;
+      _processingVoiceCommand = false;
+      _startingListen = false;
+    });
+
+    final firstPhrase = _voiceTrainingPrompts[_voiceTrainingIndex];
+    final answer = 'Vamos registrar seu jeito de falar. Repita com calma: $firstPhrase';
+    _setVoiceStatus('Treinamento de voz: repita "$firstPhrase".');
+    _add(false, answer);
+    await _say(answer);
+    _scheduleRestart(delayMs: 500);
+  }
+
+  void _handleVoiceTrainingResult(String text, {required bool isFinal}) {
+    if (!_voiceTrainingMode) return;
+
+    final normalized = _normalize(text);
+    if (normalized.length < 3) return;
+
+    // Para o treinamento, salvamos somente resultado final.
+    // Isso evita gravar música, ruído ou fragmentos do reconhecimento como perfil do usuário.
+    if (!isFinal) return;
+
+    _saveVoiceProfileSample(normalized);
+
+    _voiceTrainingIndex++;
+
+    if (_voiceTrainingIndex >= _voiceTrainingPrompts.length) {
+      _finishVoiceTraining();
+      return;
+    }
+
+    final nextPhrase = _voiceTrainingPrompts[_voiceTrainingIndex];
+    final answer = 'Registrado. Agora repita: $nextPhrase';
+    _setVoiceStatus('Treinamento de voz: repita "$nextPhrase".');
+    _add(false, answer);
+    _say(answer);
+
+    try {
+      if (_speech.isListening) {
+        _speech.stop();
+      }
+    } catch (_) {}
+
+    _blockMicrophoneRestart(const Duration(milliseconds: 900));
+    _scheduleRestart(delayMs: 1100);
+  }
+
+  Future<void> _finishVoiceTraining() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    await prefs.setBool('voiceProfileEnabled', true);
+    await prefs.setStringList('voiceProfileSamples', _voiceProfileSamples.toSet().toList());
+
+    if (!mounted) return;
+
+    _safeSetState(() {
+      _voiceTrainingMode = false;
+      _voiceProfileEnabled = true;
+      _voiceTrainingIndex = 0;
+      _commandMode = false;
+      _wakeMessageShown = false;
+      _pendingCommand = '';
+      _listening = true;
+      _manualStop = false;
+    });
+
+    const answer = 'Pronto, Luiz. Registrei seu jeito de falar. Agora vou usar esse perfil para reconhecer melhor ok Megan, oi Megan e seus comandos principais.';
+    _setVoiceStatus('Perfil de voz ativo. Diga: ok Megan.');
+    _add(false, answer);
+    await _say(answer);
+    _scheduleRestart(delayMs: 600);
+  }
+
+  Future<void> _clearVoiceTrainingProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('voiceProfileSamples');
+    await prefs.setBool('voiceProfileEnabled', false);
+
+    if (!mounted) return;
+
+    _safeSetState(() {
+      _voiceProfileSamples.clear();
+      _voiceProfileEnabled = false;
+      _voiceTrainingMode = false;
+      _voiceTrainingIndex = 0;
+    });
+
+    const answer = 'Perfil de voz apagado. Quando quiser, posso treinar sua voz novamente.';
+    _setVoiceStatus('Perfil de voz apagado.');
+    _add(false, answer);
+    await _say(answer);
+  }
+
+  void _saveVoiceProfileSample(String text) {
+    final sample = _normalize(text);
+    if (sample.length < 3) return;
+
+    if (!_voiceProfileSamples.contains(sample)) {
+      _voiceProfileSamples.add(sample);
+    }
+
+    // Limite simples para não crescer sem necessidade.
+    while (_voiceProfileSamples.length > 24) {
+      _voiceProfileSamples.removeAt(0);
+    }
+  }
+
+  bool _matchesVoiceProfileWake(String normalized) {
+    if (!_voiceProfileEnabled || _voiceProfileSamples.isEmpty) return false;
+
+    final clean = _normalize(normalized);
+    if (clean.isEmpty) return false;
+
+    for (final sample in _voiceProfileSamples) {
+      final saved = _normalize(sample);
+      if (saved.isEmpty) continue;
+
+      final savedWake = _extractWakePhraseFromProfileSample(saved);
+      if (savedWake.isEmpty) continue;
+
+      if (clean == savedWake || clean.startsWith('$savedWake ') || clean.contains(' $savedWake ')) {
+        return true;
+      }
+
+      if (_phraseClose(clean, savedWake)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  String _extractWakePhraseFromProfileSample(String sample) {
+    final normalized = _normalize(sample);
+
+    final patterns = [
+      RegExp(r'\bok\s+megan\b'),
+      RegExp(r'\boi\s+megan\b'),
+      RegExp(r'\bola\s+megan\b'),
+      RegExp(r'\bmegan\b'),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(normalized);
+      if (match != null) return match.group(0) ?? '';
+    }
+
+    return '';
+  }
+
+  bool _phraseClose(String value, String target) {
+    final valueWords = _normalize(value).split(' ').where((word) => word.isNotEmpty).toList();
+    final targetWords = _normalize(target).split(' ').where((word) => word.isNotEmpty).toList();
+
+    if (valueWords.isEmpty || targetWords.isEmpty) return false;
+    if (valueWords.length < targetWords.length) return false;
+
+    for (int i = 0; i <= valueWords.length - targetWords.length; i++) {
+      var matches = 0;
+      for (int j = 0; j < targetWords.length; j++) {
+        if (_wordClose(valueWords[i + j], targetWords[j])) matches++;
+      }
+
+      if (matches == targetWords.length) return true;
+    }
+
+    return false;
+  }
+
   Future<void> _handleVoiceCommand(String command) async {
     if (_processingVoiceCommand) return;
 
+    // FIX ESCUTA CONTÍNUA — se o STT mandar apenas "ok Megan/ok mega"
+    // como comando, não envia para a IA e não cria bolha do usuário.
+    if (_isWakeOnlyCommand(command)) {
+      _pendingCommand = '';
+      _controller.clear();
+      await _enterCommandMode();
+      return;
+    }
+
     final cleanCommand = _extractWakeCommand(command).trim();
-    if (cleanCommand.isEmpty || cleanCommand.length < 3) return;
+    if (cleanCommand.isEmpty || cleanCommand.length < 3) {
+      if (_commandMode && !_manualStop && !_mediaMode && mounted) {
+        _resumeListeningAfterTts();
+      }
+      return;
+    }
+
+    if (_isWakeOnlyCommand(cleanCommand)) {
+      _pendingCommand = '';
+      _controller.clear();
+      await _enterCommandMode();
+      return;
+    }
+
+    if (_isIsolatedVoiceFillerCommand(cleanCommand)) {
+      _pendingCommand = '';
+      _controller.clear();
+      _rememberIgnoredAudio(cleanCommand);
+      _setVoiceStatus('Escutando. Fale um comando completo, Luiz.');
+      if (_commandMode && !_manualStop && !_mediaMode && mounted) {
+        _resetConversationIdleClose();
+        _scheduleRestart(delayMs: 450);
+      }
+      return;
+    }
 
     final now = DateTime.now();
     if (cleanCommand == _lastVoiceText &&
@@ -3152,6 +4157,11 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     final words = normalized.split(' ').where((w) => w.trim().isNotEmpty).toList();
     if (words.isEmpty) return const _WakeResult(false, '');
 
+    if (_matchesVoiceProfileWake(normalized)) {
+      final profileCommand = _extractWakeCommandFromProfile(normalized);
+      return _WakeResult(true, profileCommand);
+    }
+
     final wakePatterns = <List<String>>[
       ['ok', 'megan'],
       ['okay', 'megan'],
@@ -3177,11 +4187,45 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       }
     }
 
-    if (words.length <= 3 && words.any((w) => _wordClose(w, 'megan'))) {
+    // Segurança contra música, TV e ruídos: não acorda mais com qualquer palavra parecida com "Megan"
+    // dentro de frases aleatórias. A ativação principal deve ser "ok Megan", "oi Megan"
+    // ou "olá Megan". "Megan" sozinha é validada depois por _isWakeDetectionReliable.
+    if (words.length <= 2 && words.any((w) => _wordClose(w, 'megan'))) {
       return const _WakeResult(true, '');
     }
 
     return const _WakeResult(false, '');
+  }
+
+  String _extractWakeCommandFromProfile(String normalized) {
+    var clean = _normalize(normalized);
+
+    final profileWakePhrases = <String>{
+      'ok megan',
+      'oi megan',
+      'ola megan',
+      'megan',
+    };
+
+    for (final sample in _voiceProfileSamples) {
+      final wake = _extractWakePhraseFromProfileSample(sample);
+      if (wake.isNotEmpty) profileWakePhrases.add(wake);
+    }
+
+    for (final wake in profileWakePhrases) {
+      final normalizedWake = _normalize(wake);
+      if (normalizedWake.isEmpty) continue;
+
+      if (clean == normalizedWake) return '';
+
+      if (clean.startsWith('$normalizedWake ')) {
+        return clean.substring(normalizedWake.length).trim();
+      }
+
+      clean = clean.replaceAll(RegExp(r'\b' + RegExp.escape(normalizedWake) + r'\b'), '').trim();
+    }
+
+    return clean.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   bool _wordClose(String a, String b) {
@@ -3237,6 +4281,30 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     final normalized = _normalize(text);
     if (normalized.isEmpty) return false;
 
+    // FIX ESCUTA CONTÍNUA — wake word isolada nunca pode virar comando de IA.
+    // Alguns aparelhos transcrevem "ok Megan" como "ok mega", "ok meg" ou "oi mega".
+    // Aqui tratamos essas variações antes de qualquer agente/processamento.
+    const directWakeAliases = <String>{
+      'megan',
+      'mega',
+      'meg',
+      'ok megan',
+      'ok mega',
+      'ok meg',
+      'okay megan',
+      'okay mega',
+      'okey megan',
+      'okey mega',
+      'oi megan',
+      'oi mega',
+      'ola megan',
+      'ola mega',
+      'e megan',
+      'e mega',
+    };
+
+    if (directWakeAliases.contains(normalized)) return true;
+
     final wake = _detectWakeWord(normalized);
     if (!wake.detected) return false;
 
@@ -3271,12 +4339,12 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
     var clean = normalized;
 
     final patterns = [
-      r'\bok\s+megan\b',
-      r'\bokay\s+megan\b',
-      r'\bokey\s+megan\b',
-      r'\boi\s+megan\b',
-      r'\bola\s+megan\b',
-      r'\be\s+megan\b',
+      r'\bok\s+(megan|mega|meg)\b',
+      r'\bokay\s+(megan|mega|meg)\b',
+      r'\bokey\s+(megan|mega|meg)\b',
+      r'\boi\s+(megan|mega|meg)\b',
+      r'\bola\s+(megan|mega|meg)\b',
+      r'\be\s+(megan|mega|meg)\b',
     ];
 
     for (final pattern in patterns) {
@@ -3783,7 +4851,7 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       });
 
       _setVoiceStatus(started == true
-          ? 'Presença segura ativada. Microfone pronto no app. Diga: ok Megan.'
+          ? 'Presença segura ativada. Vou tentar manter a escuta nativa leve também em segundo plano e com a tela bloqueada. Diga: ok Megan.'
           : 'Não consegui ativar a presença segura agora.');
 
       if (started == true && _speechReady && _appInForeground && !_mediaMode && !_communicationMode) {
@@ -3939,6 +5007,13 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
         subtitle: 'Resposta falada da Megan',
         icon: _voiceReply ? Icons.volume_up : Icons.volume_off,
         onTap: _toggleVoiceReplyPanelSilent,
+      ),
+      _moduleActionButton(
+        title: _voiceProfileEnabled ? 'Perfil de voz ativo' : 'Treinar voz',
+        subtitle: _voiceProfileEnabled ? 'Reconhece seu jeito' : 'Registrar ok Megan',
+        icon: Icons.record_voice_over_rounded,
+        highlighted: _voiceTrainingMode || _voiceProfileEnabled,
+        onTap: _startVoiceTraining,
       ),
       _moduleActionButton(
         title: 'Permissões',

@@ -5,13 +5,22 @@ plugins {
 }
 
 android {
-    namespace = "com.luiz.meganlife"
+    
+    buildFeatures {
+        buildConfig = true
+    }
+namespace = "com.luiz.meganlife"
     compileSdk = 36
 
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.luiz.meganlife"
+        
+        val picovoiceAccessKey = project.findProperty("PICOVOICE_ACCESS_KEY")?.toString()
+            ?: System.getenv("PICOVOICE_ACCESS_KEY")
+            ?: ""
+        buildConfigField("String", "PICOVOICE_ACCESS_KEY", "\"$picovoiceAccessKey\"")
+applicationId = "com.luiz.meganlife"
         minSdk = 26
         targetSdk = 36
         versionCode = 702
@@ -37,4 +46,8 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation("ai.picovoice:porcupine-android:4.0.0")
 }

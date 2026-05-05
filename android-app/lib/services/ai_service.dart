@@ -4,8 +4,23 @@ import 'package:http/http.dart' as http;
 import 'config.dart';
 import 'memory_service.dart';
 
+class _AiCachedResponse {
+  final Map<String, dynamic> data;
+  final DateTime createdAt;
+
+  const _AiCachedResponse({
+    required this.data,
+    required this.createdAt,
+  });
+}
+
 class AiService {
   final MeganMemoryService _localMemory = MeganMemoryService();
+
+  static final Map<String, Future<Map<String, dynamic>>> _pendingChatRequests = {};
+  static final Map<String, _AiCachedResponse> _recentChatResponses = {};
+  static const Duration _duplicateWindow = Duration(milliseconds: 3500);
+  static const Duration _cacheWindow = Duration(seconds: 8);
   String _normalize(String text) {
     return text
         .toLowerCase()
@@ -160,6 +175,78 @@ class AiService {
     return actions;
   }
 
+
+  String _buildChatRequestKey({
+    required String userId,
+    required String message,
+  }) {
+    return '$userId:${_normalize(message).replaceAll(RegExp(r'\s+'), ' ')}';
+  }
+
+  Future<Map<String, dynamic>> _sendChatRequest({
+    required String message,
+    required String userId,
+    required List<Map<String, dynamic>> actions,
+  }) {
+    final key = _buildChatRequestKey(userId: userId, message: message);
+    final now = DateTime.now();
+    final cached = _recentChatResponses[key];
+
+    if (cached != null && now.difference(cached.createdAt) < _cacheWindow) {
+      return Future.value(Map<String, dynamic>.from(cached.data));
+    }
+
+    final pending = _pendingChatRequests[key];
+    if (pending != null) {
+      return pending;
+    }
+
+    final future = () async {
+      final r = await http.post(
+        Uri.parse('${MeganConfig.baseUrl}/api/chat'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'message': message,
+          'userId': userId,
+          'device': 'android-real-device',
+          'mode': 'megan-life-7.1-memory',
+          'memoryContext': await _localMemory.buildMemoryContext(),
+        }),
+      );
+
+      final response = _safeParse(r, 'Falha no chat');
+      final data = {
+        'ok': r.statusCode < 400,
+        'actions': actions,
+        'response': response,
+      };
+
+      _recentChatResponses[key] = _AiCachedResponse(
+        data: Map<String, dynamic>.from(data),
+        createdAt: DateTime.now(),
+      );
+
+      _cleanupChatCache();
+      return data;
+    }();
+
+    _pendingChatRequests[key] = future;
+
+    future.whenComplete(() {
+      _pendingChatRequests.remove(key);
+    });
+
+    return future;
+  }
+
+  void _cleanupChatCache() {
+    final now = DateTime.now();
+
+    _recentChatResponses.removeWhere((_, value) {
+      return now.difference(value.createdAt) > _duplicateWindow;
+    });
+  }
+
   Future<Map<String, dynamic>> process(String message) async {
     try {
       final lower = message.toLowerCase();
@@ -183,10 +270,10 @@ class AiService {
           lower.startsWith('apague da memória ') ||
           lower.startsWith('apague da memoria ')) {
         final value = message
-            .replaceFirst(RegExp(r'^esqueça\\s+', caseSensitive: false), '')
-            .replaceFirst(RegExp(r'^esqueca\\s+', caseSensitive: false), '')
-            .replaceFirst(RegExp(r'^apague da memória\\s+', caseSensitive: false), '')
-            .replaceFirst(RegExp(r'^apague da memoria\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^esqueça\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^esqueca\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^apague da memória\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^apague da memoria\s+', caseSensitive: false), '')
             .trim();
 
         await _localMemory.forget(value);
@@ -204,9 +291,9 @@ class AiService {
           lower.startsWith('lembra que ') ||
           lower.startsWith('memorize que ')) {
         final value = message
-            .replaceFirst(RegExp(r'^lembre que\\s+', caseSensitive: false), '')
-            .replaceFirst(RegExp(r'^lembra que\\s+', caseSensitive: false), '')
-            .replaceFirst(RegExp(r'^memorize que\\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^lembre que\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^lembra que\s+', caseSensitive: false), '')
+            .replaceFirst(RegExp(r'^memorize que\s+', caseSensitive: false), '')
             .trim();
 
         return {
@@ -257,23 +344,11 @@ class AiService {
       }
 
       if (actions.length == 1 && actions.first['type'] == 'chat') {
-        final r = await http.post(
-          Uri.parse('${MeganConfig.baseUrl}/api/chat'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'message': message,
-            'userId': userId,
-            'device': 'android-real-device',
-            'mode': 'megan-life-7.1-memory',
-            'memoryContext': await _localMemory.buildMemoryContext(),
-          }),
+        return _sendChatRequest(
+          message: message,
+          userId: userId,
+          actions: actions,
         );
-
-        return {
-          'ok': true,
-          'actions': actions,
-          'response': _safeParse(r, 'Falha no chat'),
-        };
       }
 
       return {

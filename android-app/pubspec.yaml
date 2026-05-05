@@ -13,7 +13,7 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
-  http: ^1.2.2
+  http: ^1.6.0
   audioplayers: ^6.1.0
   file_picker: ^8.1.2
   url_launcher: ^6.3.0
@@ -24,6 +24,7 @@ dependencies:
   health: ^11.1.0
   share_plus: ^10.1.4
   device_info_plus: ^10.1.2
+  geolocator: ^14.0.2
 
 dev_dependencies:
   flutter_test:

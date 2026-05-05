@@ -18,6 +18,12 @@
 
     <!-- Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+
+    <!-- ⏰ LEMBRETES / ALERTAS REAIS -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
 
     <!-- Android 14+ foreground service permissions.
          Mantidas apenas as compatíveis com o app atual e sem background agressivo. -->
@@ -107,6 +113,8 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:windowSoftInputMode="adjustResize">
 
             <meta-data
@@ -137,13 +145,33 @@
             </intent-filter>
         </activity-alias>
 
+
+        <!-- 🎙️ ACTIVITY TRANSPARENTE PARA ESCUTA NATIVA DE COMANDO
+             Necessária porque o Android bloqueia SpeechRecognizer direto no Service em muitos aparelhos. -->
+        <activity
+            android:name=".MeganNativeSpeechActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:finishOnTaskLaunch="true"/>
+
+        <!-- ⏰ RECEIVER DE LEMBRETES -->
+        <receiver
+            android:name=".MeganReminderReceiver"
+            android:enabled="true"
+            android:exported="false"/>
+
         <!-- 🔥 SERVIÇO FOREGROUND
              Mantido como dataSync para preservar a estabilidade atual. -->
         <service
             android:name=".MeganPresenceService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync"/>
+            android:foregroundServiceType="microphone|dataSync"/>
 
         <!-- 🔥 ACCESSIBILITY -->
         <service

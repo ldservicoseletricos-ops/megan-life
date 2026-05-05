@@ -43,25 +43,13 @@ class ContextAgent {
     final clean = currentText.trim();
     if (clean.isEmpty) return clean;
 
-    if (memory.isEmpty) return clean;
-
-    final buffer = StringBuffer();
-
-    buffer.writeln('Contexto recente da conversa:');
-
-    for (final item in memory) {
-      buffer.writeln('Luiz: ${item.userText}');
-      buffer.writeln('Megan: ${item.meganText}');
-    }
-
-    buffer.writeln('');
-    buffer.writeln('Mensagem atual: $clean');
-
-    if (isFollowUp(clean)) {
-      buffer.writeln('');
-      buffer.writeln('Use o contexto para continuar a conversa.');
-    }
-
-    return buffer.toString().trim();
+    // Correção de segurança:
+    // O ContextAgent não deve montar blocos com "Contexto recente" para o mesmo
+    // fluxo que também pode executar ações da IA. Quando esse bloco era enviado
+    // para a IA, ela podia devolver action open_app usando o próprio texto do
+    // histórico como alvo, gerando loop como "open_app contexto recente".
+    // Mantemos o método e a assinatura para não quebrar o HomeScreen, mas agora
+    // ele devolve apenas a fala atual do usuário.
+    return clean;
   }
 }

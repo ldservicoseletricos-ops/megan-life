@@ -35,7 +35,50 @@ class DecisionAgent {
         .trim();
   }
 
+  bool _looksLikeContextPayload(String command) {
+    final raw = command.trim();
+    if (raw.isEmpty) return false;
+
+    final normalized = _normalize(raw);
+
+    // Bloqueia pacotes de contexto/memória que podem vir da IA ou do ContextAgent.
+    // Esses textos servem apenas para resposta conversacional, nunca para ação real.
+    return raw.contains('Contexto recente da conversa:') ||
+        raw.contains('Mensagem atual:') ||
+        raw.contains('Mensagem atual do Luiz:') ||
+        normalized.contains('contexto recente da conversa') ||
+        normalized.contains('mensagem atual') ||
+        normalized.contains('luiz business megan abrindo whatsapp') ||
+        normalized.startsWith('luiz ') && normalized.contains(' megan ');
+  }
+
+  String _extractCurrentMessageIfContextPayload(String command) {
+    final raw = command.trim();
+    if (raw.isEmpty) return raw;
+
+    final markers = <String>[
+      'Mensagem atual do Luiz:',
+      'Mensagem atual:',
+    ];
+
+    for (final marker in markers) {
+      final index = raw.lastIndexOf(marker);
+      if (index >= 0) {
+        final extracted = raw.substring(index + marker.length).trim();
+        if (extracted.isNotEmpty) {
+          return extracted.split('\n').first.trim();
+        }
+      }
+    }
+
+    return raw;
+  }
+
   Future<DecisionResult> decide(String command) async {
+    if (_looksLikeContextPayload(command)) {
+      return DecisionResult(type: DecisionType.ai);
+    }
+
     final text = _normalize(command);
 
     if (text.isEmpty) {
@@ -83,6 +126,9 @@ class DecisionAgent {
   }) async {
     final clean = command.trim();
     if (clean.isEmpty) return false;
+
+    // Segurança: nunca executar contexto/memória como ação real.
+    if (_looksLikeContextPayload(clean)) return false;
 
     final decision = await decide(clean);
 
@@ -147,6 +193,9 @@ class DecisionAgent {
   }) async {
     final clean = command.trim();
     if (clean.isEmpty) return false;
+
+    // Segurança: nunca dividir/executar pacote de contexto como multi-ação.
+    if (_looksLikeContextPayload(clean)) return false;
 
     final parts = clean
         .split(RegExp(r'\s+(?:e depois|depois|em seguida|e entao|e então)\s+', caseSensitive: false))

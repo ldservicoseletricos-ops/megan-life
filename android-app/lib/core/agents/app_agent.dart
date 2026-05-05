@@ -30,6 +30,11 @@ class AppAgent {
 
     if (text.isEmpty) return false;
 
+    // Segurança: nunca tratar contexto/memória como comando de abrir app.
+    if (text.contains('contexto recente') || text.contains('mensagem atual')) {
+      return false;
+    }
+
     // Não assume fluxos que já pertencem a outros agentes.
     if (text.contains('whatsapp') ||
         text.contains('zap') ||
@@ -68,6 +73,10 @@ class AppAgent {
 
   String extractAppName(String command) {
     var text = _normalize(command);
+
+    if (text.contains('contexto recente') || text.contains('mensagem atual')) {
+      return '';
+    }
 
     final patterns = [
       'abrir o aplicativo ',
