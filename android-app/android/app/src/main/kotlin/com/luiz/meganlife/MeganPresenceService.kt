@@ -496,27 +496,27 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
 
             isOpenWhatsAppBusinessCommand(realCommand) -> {
                 speakNative("Abrindo WhatsApp Business.")
-                openApp("com.whatsapp.w4b", "WhatsApp Business")
+                openAppFromBackground("com.whatsapp.w4b")
             }
 
             isOpenWhatsAppCommand(realCommand) -> {
                 speakNative("Abrindo WhatsApp.")
-                openApp("com.whatsapp", "WhatsApp")
+                openAppFromBackground("com.whatsapp")
             }
 
             isOpenWazeCommand(realCommand) -> {
                 speakNative("Abrindo Waze.")
-                openApp("com.waze", "Waze")
+                openAppFromBackground("com.waze")
             }
 
             isOpenMapsCommand(realCommand) -> {
                 speakNative("Abrindo Google Maps.")
-                openApp("com.google.android.apps.maps", "Google Maps")
+                openAppFromBackground("com.google.android.apps.maps")
             }
 
             isOpenYouTubeCommand(realCommand) -> {
                 speakNative("Abrindo YouTube.")
-                openApp("com.google.android.youtube", "YouTube")
+                openAppFromBackground("com.google.android.youtube")
             }
 
             isGreetingCommand(realCommand) -> {
@@ -786,18 +786,29 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun openApp(packageName: String, appName: String) {
+    private fun openAppFromBackground(packageName: String) {
         try {
-            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            val openedByAccessibility = MeganAccessibilityService.instance?.openApp(packageName) == true
 
-            if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(intent)
-            } else {
-                speakNative("Não encontrei o $appName instalado.")
+            if (openedByAccessibility) {
+                return
             }
+
+            MainActivity.markNativeWakeDetected()
+
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                putExtra("nativeWakeDetected", true)
+                putExtra("open_app_package", packageName)
+            }
+
+            startActivity(intent)
         } catch (_: Exception) {
-            speakNative("Erro ao tentar abrir o $appName.")
+            showWakeNotification()
         }
     }
 

@@ -44,17 +44,43 @@ class MainActivity: FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         captureNativeWakeIntent(intent)
+        handleOpenAppIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         captureNativeWakeIntent(intent)
+        handleOpenAppIntent(intent)
     }
 
     private fun captureNativeWakeIntent(intent: Intent?) {
         if (intent?.getBooleanExtra("nativeWakeDetected", false) == true) {
             markNativeWakeDetected()
+        }
+    }
+
+    private fun handleOpenAppIntent(intent: Intent?) {
+        val packageName = intent?.getStringExtra("open_app_package") ?: return
+        openInstalledApp(packageName)
+    }
+
+    private fun openInstalledApp(packageName: String): Boolean {
+        return try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                startActivity(launchIntent)
+                true
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -89,15 +115,12 @@ class MainActivity: FlutterActivity() {
                     "openApp" -> {
                         val packageName = call.argument<String>("package")
 
-                        val intent = packageManager.getLaunchIntentForPackage(packageName!!)
-
-                        if (intent != null) {
-                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(intent)
-                            result.success(true)
-                        } else {
+                        if (packageName.isNullOrBlank()) {
                             result.success(false)
+                            return@setMethodCallHandler
                         }
+
+                        result.success(openInstalledApp(packageName))
                     }
 
                     else -> result.notImplemented()
@@ -119,8 +142,23 @@ class MainActivity: FlutterActivity() {
 
                     "action" -> {
                         val action = call.argument<String>("type")
-                        service.performAction(action!!)
+                        if (action.isNullOrBlank()) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+
+                        service.performAction(action)
                         result.success(true)
+                    }
+
+                    "openApp" -> {
+                        val packageName = call.argument<String>("package")
+                        if (packageName.isNullOrBlank()) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+
+                        result.success(service.openApp(packageName))
                     }
 
                     else -> result.notImplemented()
