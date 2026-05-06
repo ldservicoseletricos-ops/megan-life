@@ -8,7 +8,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -494,29 +496,16 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
                 speakNative("Hoje é $date.")
             }
 
-            isOpenWhatsAppBusinessCommand(realCommand) -> {
-                speakNative("Abrindo WhatsApp Business.")
-                openAppFromBackground("com.whatsapp.w4b")
-            }
+            isAnyOpenExternalAppCommand(realCommand) -> {
+                val appName = extractAppNameFromOpenCommand(realCommand)
+                val packageName = findInstalledPackageForAppName(appName)
 
-            isOpenWhatsAppCommand(realCommand) -> {
-                speakNative("Abrindo WhatsApp.")
-                openAppFromBackground("com.whatsapp")
-            }
-
-            isOpenWazeCommand(realCommand) -> {
-                speakNative("Abrindo Waze.")
-                openAppFromBackground("com.waze")
-            }
-
-            isOpenMapsCommand(realCommand) -> {
-                speakNative("Abrindo Google Maps.")
-                openAppFromBackground("com.google.android.apps.maps")
-            }
-
-            isOpenYouTubeCommand(realCommand) -> {
-                speakNative("Abrindo YouTube.")
-                openAppFromBackground("com.google.android.youtube")
+                if (packageName != null) {
+                    speakNative("Abrindo $appName.")
+                    openAppFromBackground(packageName)
+                } else {
+                    speakNative("Não encontrei $appName instalado, Luiz.")
+                }
             }
 
             isGreetingCommand(realCommand) -> {
@@ -641,11 +630,211 @@ class MeganPresenceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun isAnyOpenExternalAppCommand(text: String): Boolean {
-        return isOpenWhatsAppCommand(text) ||
-            isOpenWhatsAppBusinessCommand(text) ||
-            isOpenWazeCommand(text) ||
-            isOpenMapsCommand(text) ||
-            isOpenYouTubeCommand(text)
+        val command = normalize(text)
+
+        return command.startsWith("abrir ") ||
+            command.startsWith("abre ") ||
+            command.startsWith("iniciar ") ||
+            command.startsWith("executar ") ||
+            command.contains("abrir aplicativo ") ||
+            command.contains("abrir app ") ||
+            command.contains("abre aplicativo ") ||
+            command.contains("abre app ") ||
+            isOpenWhatsAppCommand(command) ||
+            isOpenWhatsAppBusinessCommand(command) ||
+            isOpenWazeCommand(command) ||
+            isOpenMapsCommand(command) ||
+            isOpenYouTubeCommand(command)
+    }
+
+    private fun extractAppNameFromOpenCommand(text: String): String {
+        var command = normalize(text)
+
+        val patterns = listOf(
+            "abrir o aplicativo ",
+            "abrir aplicativo ",
+            "abrir o app ",
+            "abrir app ",
+            "abrir ",
+            "abre o aplicativo ",
+            "abre aplicativo ",
+            "abre o app ",
+            "abre app ",
+            "abre ",
+            "iniciar o aplicativo ",
+            "iniciar aplicativo ",
+            "iniciar o app ",
+            "iniciar app ",
+            "iniciar ",
+            "executar o aplicativo ",
+            "executar aplicativo ",
+            "executar o app ",
+            "executar app ",
+            "executar "
+        )
+
+        for (pattern in patterns) {
+            if (command.contains(pattern)) {
+                command = command.substringAfter(pattern).trim()
+                break
+            }
+        }
+
+        command = command
+            .removePrefix("o ")
+            .removePrefix("a ")
+            .removePrefix("app ")
+            .removePrefix("aplicativo ")
+            .trim()
+
+        return when (command) {
+            "zap", "wpp" -> "whatsapp"
+            "zap business", "wpp business", "business" -> "whatsapp business"
+            "insta" -> "instagram"
+            "yt", "you tube" -> "youtube"
+            "mapa", "maps" -> "google maps"
+            "rvx", "revanced", "youtube rvx", "youtube revanced" -> "rvx"
+            else -> command
+        }
+    }
+
+    private fun findInstalledPackageForAppName(appName: String): String? {
+        val target = normalize(appName)
+        if (target.isBlank()) return null
+
+        val knownPackages = mapOf(
+            "whatsapp" to "com.whatsapp",
+            "zap" to "com.whatsapp",
+            "wpp" to "com.whatsapp",
+            "whatsapp business" to "com.whatsapp.w4b",
+            "zap business" to "com.whatsapp.w4b",
+            "wpp business" to "com.whatsapp.w4b",
+            "waze" to "com.waze",
+            "maps" to "com.google.android.apps.maps",
+            "google maps" to "com.google.android.apps.maps",
+            "mapa" to "com.google.android.apps.maps",
+            "youtube" to "com.google.android.youtube",
+            "you tube" to "com.google.android.youtube",
+            "yt" to "com.google.android.youtube",
+            "spotify" to "com.spotify.music",
+            "instagram" to "com.instagram.android",
+            "insta" to "com.instagram.android",
+            "telegram" to "org.telegram.messenger",
+            "gmail" to "com.google.android.gm",
+            "nubank" to "com.nu.production",
+            "rvx" to "app.rvx.android.youtube",
+            "revanced" to "app.revanced.android.youtube"
+        )
+
+        knownPackages[target]?.let { packageName ->
+            if (isPackageLaunchable(packageName)) return packageName
+        }
+
+        val launcherApps = getLaunchableApps()
+        val compactTarget = target.replace(" ", "")
+        var bestPackage: String? = null
+        var bestScore = 0
+
+        for (item in launcherApps) {
+            val label = normalize(item.first)
+            val packageName = item.second
+            val compactLabel = label.replace(" ", "")
+            val compactPackage = normalize(packageName).replace(" ", "")
+
+            if (label.isBlank() || packageName.isBlank()) continue
+
+            val score = when {
+                label == target || compactLabel == compactTarget -> 140
+                label.contains(target) || compactLabel.contains(compactTarget) -> 120
+                target.contains(label) || compactTarget.contains(compactLabel) -> 105
+                packageName.contains(target, ignoreCase = true) ||
+                    compactPackage.contains(compactTarget) -> 100
+                isRvxMatch(target, label, packageName) -> 130
+                wordsMatch(target, label) -> 85
+                else -> 0
+            }
+
+            if (score > bestScore) {
+                bestScore = score
+                bestPackage = packageName
+            }
+        }
+
+        return if (bestScore >= 85) bestPackage else null
+    }
+
+    private fun getLaunchableApps(): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+
+        try {
+            val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+
+            val activities: List<ResolveInfo> = packageManager.queryIntentActivities(
+                launcherIntent,
+                PackageManager.MATCH_ALL
+            )
+
+            for (resolveInfo in activities) {
+                val activityInfo = resolveInfo.activityInfo ?: continue
+                val packageName = activityInfo.packageName ?: continue
+                val label = resolveInfo.loadLabel(packageManager)?.toString()
+                    ?: activityInfo.loadLabel(packageManager)?.toString()
+                    ?: packageName
+
+                if (packageName.isNotBlank()) {
+                    result.add(label to packageName)
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        return result.distinctBy { it.second }
+    }
+
+    private fun isRvxMatch(target: String, label: String, packageName: String): Boolean {
+        val compactTarget = target.replace(" ", "")
+        val compactLabel = label.replace(" ", "")
+        val compactPackage = packageName.lowercase(Locale("pt", "BR"))
+
+        if (compactTarget == "rvx" || compactTarget == "revanced") {
+            return compactLabel.contains("rvx") ||
+                compactLabel.contains("revanced") ||
+                compactPackage.contains("rvx") ||
+                compactPackage.contains("revanced")
+        }
+
+        return false
+    }
+
+    private fun wordsMatch(input: String, label: String): Boolean {
+        val inputWords = input.split(" ").filter { it.length >= 2 }
+        val labelWords = label.split(" ").filter { it.length >= 2 }
+
+        if (inputWords.isEmpty() || labelWords.isEmpty()) return false
+
+        var hits = 0
+
+        for (inputWord in inputWords) {
+            if (labelWords.any { labelWord ->
+                    labelWord == inputWord ||
+                        labelWord.contains(inputWord) ||
+                        inputWord.contains(labelWord)
+                }) {
+                hits++
+            }
+        }
+
+        return hits >= 1 && hits == inputWords.size
+    }
+
+    private fun isPackageLaunchable(packageName: String): Boolean {
+        return try {
+            packageManager.getLaunchIntentForPackage(packageName) != null
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun isOpenWhatsAppCommand(text: String): Boolean {

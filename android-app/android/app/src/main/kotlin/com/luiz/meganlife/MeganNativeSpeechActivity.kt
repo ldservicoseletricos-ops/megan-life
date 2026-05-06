@@ -3,6 +3,7 @@ package com.luiz.meganlife
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -13,6 +14,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
+import java.text.Normalizer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,31 +45,24 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
                 tts?.setPitch(1.04f)
 
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {
-                    }
+                    override fun onStart(utteranceId: String?) {}
 
                     override fun onDone(utteranceId: String?) {
                         if (utteranceId == "megan_native_intro") {
-                            runOnUiThread {
-                                startCommandListening()
-                            }
+                            runOnUiThread { startCommandListening() }
                         }
                     }
 
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
                         if (utteranceId == "megan_native_intro") {
-                            runOnUiThread {
-                                startCommandListening()
-                            }
+                            runOnUiThread { startCommandListening() }
                         }
                     }
 
                     override fun onError(utteranceId: String?, errorCode: Int) {
                         if (utteranceId == "megan_native_intro") {
-                            runOnUiThread {
-                                startCommandListening()
-                            }
+                            runOnUiThread { startCommandListening() }
                         }
                     }
                 })
@@ -115,9 +110,7 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
         if (ttsReady) {
             speakNative("Estou ouvindo, Luiz. Pode falar.", utteranceId = "megan_native_intro")
         } else {
-            runOnUiThread {
-                startCommandListening()
-            }
+            runOnUiThread { startCommandListening() }
         }
     }
 
@@ -147,22 +140,11 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
             }
 
             speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    isListening = true
-                }
-
-                override fun onBeginningOfSpeech() {
-                }
-
-                override fun onRmsChanged(rmsdB: Float) {
-                }
-
-                override fun onBufferReceived(buffer: ByteArray?) {
-                }
-
-                override fun onEndOfSpeech() {
-                    isListening = false
-                }
+                override fun onReadyForSpeech(params: Bundle?) { isListening = true }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() { isListening = false }
 
                 override fun onError(error: Int) {
                     isListening = false
@@ -194,11 +176,8 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
                     handleNativeCommand(command)
                 }
 
-                override fun onPartialResults(partialResults: Bundle?) {
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {
-                }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
             })
 
             isListening = true
@@ -211,7 +190,7 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun handleNativeCommand(command: String) {
-        val clean = command.trim().lowercase(Locale("pt", "BR"))
+        val clean = normalize(command)
 
         if (clean.isBlank()) {
             speakNative("Não entendi o comando, Luiz.")
@@ -228,7 +207,6 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
 
             clean.contains("seu nome") ||
                 clean.contains("qual seu nome") ||
-                clean.contains("quem é você") ||
                 clean.contains("quem e voce") -> {
                 speakNative("Eu sou a Megan Life, sua assistente.")
                 finishSoon(2500)
@@ -237,6 +215,20 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
             clean.contains("teste") || clean.contains("funcionando") -> {
                 speakNative("Estou funcionando em modo invisível, Luiz.")
                 finishSoon(2500)
+            }
+
+            isOpenAppCommand(clean) -> {
+                val appName = extractAppName(clean)
+                val opened = openInstalledAppByName(appName)
+
+                if (opened) {
+                    speakNative("Abrindo $appName.")
+                    finishSoon(900)
+                } else {
+                    speakNative("Não encontrei $appName instalado.")
+                    openMainActivity()
+                    finishSoon(1400)
+                }
             }
 
             clean.contains("abrir megan") ||
@@ -249,8 +241,8 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
             }
 
             clean.contains("parar") ||
-                clean.contains("desativar presença") ||
-                clean.contains("desliga presença") -> {
+                clean.contains("desativar presenca") ||
+                clean.contains("desliga presenca") -> {
                 speakNative("Tudo bem, Luiz. Vou desativar a presença segura.")
                 stopPresenceService()
                 finishSoon(1600)
@@ -262,6 +254,115 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
                 finishSoon(1800)
             }
         }
+    }
+
+    private fun isOpenAppCommand(command: String): Boolean {
+        return command.startsWith("abrir ") ||
+            command.startsWith("abre ") ||
+            command.startsWith("iniciar ") ||
+            command.startsWith("executar ") ||
+            command.contains("abrir aplicativo") ||
+            command.contains("abrir app")
+    }
+
+    private fun extractAppName(command: String): String {
+        var value = command
+            .replace("abrir o aplicativo", "")
+            .replace("abrir aplicativo", "")
+            .replace("abrir o app", "")
+            .replace("abrir app", "")
+            .replace("abrir", "")
+            .replace("abre o aplicativo", "")
+            .replace("abre aplicativo", "")
+            .replace("abre o app", "")
+            .replace("abre app", "")
+            .replace("abre", "")
+            .replace("iniciar", "")
+            .replace("executar", "")
+            .replace("o ", " ")
+            .replace("a ", " ")
+            .replace("app ", " ")
+            .replace("aplicativo ", " ")
+            .trim()
+
+        if (value == "zap" || value == "wpp") value = "whatsapp"
+        if (value == "insta") value = "instagram"
+        if (value == "yt") value = "youtube"
+
+        return value
+    }
+
+    private fun openInstalledAppByName(appName: String): Boolean {
+        val target = normalize(appName)
+        if (target.isBlank()) return false
+
+        val known = mapOf(
+            "whatsapp" to "com.whatsapp",
+            "whatsapp business" to "com.whatsapp.w4b",
+            "waze" to "com.waze",
+            "maps" to "com.google.android.apps.maps",
+            "google maps" to "com.google.android.apps.maps",
+            "youtube" to "com.google.android.youtube",
+            "spotify" to "com.spotify.music",
+            "instagram" to "com.instagram.android",
+            "telegram" to "org.telegram.messenger",
+            "gmail" to "com.google.android.gm",
+            "nubank" to "com.nu.production"
+        )
+
+        val knownPackage = known[target]
+        if (knownPackage != null && openPackage(knownPackage)) return true
+
+        val apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+        var bestPackage: String? = null
+        var bestScore = 0
+
+        for (app in apps) {
+            if ((app.flags and ApplicationInfo.FLAG_SYSTEM) != 0) continue
+
+            val label = normalize(packageManager.getApplicationLabel(app).toString())
+            val compactLabel = label.replace(" ", "")
+            val compactTarget = target.replace(" ", "")
+
+            if (label.isBlank()) continue
+
+            val score = when {
+                label == target || compactLabel == compactTarget -> 120
+                label.contains(target) || compactLabel.contains(compactTarget) -> 95
+                target.contains(label) || compactTarget.contains(compactLabel) -> 85
+                else -> 0
+            }
+
+            if (score > bestScore) {
+                bestScore = score
+                bestPackage = app.packageName
+            }
+        }
+
+        return bestPackage != null && bestScore >= 85 && openPackage(bestPackage!!)
+    }
+
+    private fun openPackage(packageName: String): Boolean {
+        return try {
+            val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun normalize(text: String): String {
+        val decomposed = Normalizer.normalize(text.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
+        return decomposed
+            .replace(Regex("\\p{Mn}+"), "")
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun openMainActivity() {
@@ -297,12 +398,7 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
             if (!ttsReady || text.isBlank()) return
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                tts?.speak(
-                    text,
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    utteranceId
-                )
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
             } else {
                 @Suppress("DEPRECATION")
                 tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null)
@@ -318,9 +414,7 @@ class MeganNativeSpeechActivity : Activity(), TextToSpeech.OnInitListener {
             } catch (_: Exception) {
             }
 
-            runOnUiThread {
-                finishSafely()
-            }
+            runOnUiThread { finishSafely() }
         }.start()
     }
 

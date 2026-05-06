@@ -937,6 +937,107 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return true;
   }
 
+
+  String? _extractAnyInstalledAppName(String text) {
+    final original = text.trim();
+    if (original.isEmpty) return null;
+
+    final normalized = _normalize(original);
+
+    final blockedIntents = <String>[
+      'que horas',
+      'que hora',
+      'que dia',
+      'data',
+      'clima',
+      'temperatura',
+      'lembrete',
+      'alarme',
+      'despertador',
+      'saude',
+      'saúde',
+      'passos',
+      'batimento',
+      'me leva',
+      'navegar',
+      'rota',
+      'ir para',
+      'ir pra',
+      'mensagem',
+      'mandar',
+      'enviar',
+    ];
+
+    for (final blocked in blockedIntents) {
+      if (normalized.contains(blocked)) return null;
+    }
+
+    final patterns = <RegExp>[
+      RegExp(r'^(?:abrir|abre|abra|iniciar|inicia|executar|execute)\s+(?:o\s+|a\s+|app\s+|aplicativo\s+)?(.+)$', caseSensitive: false),
+      RegExp(r'^(?:quero\s+abrir|pode\s+abrir)\s+(?:o\s+|a\s+|app\s+|aplicativo\s+)?(.+)$', caseSensitive: false),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(original);
+      if (match == null) continue;
+
+      var appName = (match.group(1) ?? '').trim();
+      appName = appName
+          .replaceAll(RegExp(r'[.!?]+$'), '')
+          .replaceAll(RegExp(r'\s+', caseSensitive: false), ' ')
+          .trim();
+
+      if (appName.isEmpty) return null;
+
+      final appNormalized = _normalize(appName);
+      if (appNormalized == 'megan' ||
+          appNormalized == 'megan life' ||
+          appNormalized == 'a megan' ||
+          appNormalized == 'o app') {
+        return null;
+      }
+
+      return appName;
+    }
+
+    return null;
+  }
+
+  Future<bool> _tryOpenAnyInstalledAppSafely(String text) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return false;
+
+    if (_isCommunicationAppCommand(clean)) return false;
+
+    final appName = _extractAnyInstalledAppName(clean);
+    if (appName == null || appName.trim().isEmpty) return false;
+
+    try {
+      await _apps.loadApps();
+    } catch (_) {}
+
+    await _enterMediaMode(sourceCommand: clean);
+
+    final opened = await _apps.openKnownApp(appName);
+
+    if (opened) {
+      final answer = 'Abrindo $appName em modo seguro. Microfone pausado para não interferir no app.';
+      if (mounted) _safeSetState(() => _lastCommandText = clean);
+      _add(false, answer);
+      _rememberConversation(clean, answer);
+      await _rememberSmartIntent('open_app', appName);
+      return true;
+    }
+
+    await _exitMediaMode();
+
+    final answer = 'Luiz, não encontrei $appName nos apps instalados. Tente falar o nome como aparece no celular.';
+    _add(false, answer);
+    _rememberConversation(clean, answer);
+    await _say(answer);
+    return true;
+  }
+
   List<String> _splitCommandParts(String text) {
     return text
         .split(RegExp(r'\s+(?:e\s+depois|depois|em seguida|e entao|e então|e)\s+', caseSensitive: false))
@@ -2915,6 +3016,12 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       // 🎬 Backup do modo mídia conhecido, preservado para comandos específicos de mídia.
       final handledByMediaMode = await _tryOpenMediaCommandSafely(cleanText);
       if (handledByMediaMode) return;
+
+      // 📱 Abertura dinâmica de qualquer app instalado.
+      // Entra depois dos fluxos protegidos já existentes para não quebrar WhatsApp,
+      // navegação, saúde, clima, lembretes e mídia conhecida.
+      final handledByAnyInstalledApp = await _tryOpenAnyInstalledAppSafely(cleanText);
+      if (handledByAnyInstalledApp) return;
 
       // 🧠 5.0.9 — Inteligência adaptativa segura.
       // Registra padrões de uso e sugere automação sem bloquear o fluxo atual.

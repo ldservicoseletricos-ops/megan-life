@@ -30,18 +30,7 @@ class AppAgent {
 
     if (text.isEmpty) return false;
 
-    // Segurança: nunca tratar contexto/memória como comando de abrir app.
     if (text.contains('contexto recente') || text.contains('mensagem atual')) {
-      return false;
-    }
-
-    // Não assume fluxos que já pertencem a outros agentes.
-    if (text.contains('whatsapp') ||
-        text.contains('zap') ||
-        text.contains('wpp') ||
-        text.contains('mensagem') ||
-        text.contains('mandar') ||
-        text.contains('enviar')) {
       return false;
     }
 
@@ -132,8 +121,6 @@ class AppAgent {
     final appName = extractAppName(command);
     if (appName.isEmpty) return false;
 
-    if (_apps.isCommunicationAppName(appName)) return false;
-
     return _apps.canOpenExternalAppName(appName);
   }
 
@@ -141,7 +128,6 @@ class AppAgent {
     if (!canHandle(command)) return false;
 
     final appName = extractAppName(command);
-
     if (appName.isEmpty) return false;
 
     return await _apps.openKnownApp(appName);
@@ -151,8 +137,7 @@ class AppAgent {
     if (!canHandle(command)) return false;
 
     final appName = extractAppName(command);
-
-    if (appName.isEmpty || !_apps.isMediaAppName(appName)) return false;
+    if (appName.isEmpty) return false;
 
     return await _apps.openMediaApp(appName);
   }
@@ -161,8 +146,7 @@ class AppAgent {
     if (!canHandle(command)) return false;
 
     final appName = extractAppName(command);
-
-    if (appName.isEmpty || !_apps.isCommunicationAppName(appName)) return false;
+    if (appName.isEmpty) return false;
 
     return await _apps.openCommunicationApp(appName);
   }
@@ -171,9 +155,7 @@ class AppAgent {
     if (!canHandle(command)) return false;
 
     final appName = extractAppName(command);
-
-    if (appName.isEmpty || _apps.isCommunicationAppName(appName)) return false;
-    if (!_apps.canOpenExternalAppName(appName)) return false;
+    if (appName.isEmpty) return false;
 
     return await _apps.openExternalApp(appName);
   }

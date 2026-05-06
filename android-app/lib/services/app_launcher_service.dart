@@ -69,6 +69,8 @@ class AppLauncherService {
     'spotify': 'spotify://',
   };
 
+  List<Map<String, dynamic>> get installedApps => List.unmodifiable(_installedApps);
+
   Future<void> loadApps() async {
     if (!Platform.isAndroid) return;
 
@@ -79,6 +81,11 @@ class AppLauncherService {
         _installedApps = apps
             .whereType<Map>()
             .map((item) => Map<String, dynamic>.from(item))
+            .where((item) {
+              final name = (item['name'] ?? '').toString().trim();
+              final packageName = (item['package'] ?? '').toString().trim();
+              return name.isNotEmpty && packageName.isNotEmpty;
+            })
             .toList();
       }
     } catch (_) {
@@ -102,7 +109,7 @@ class AppLauncherService {
         .replaceAll('ú', 'u')
         .replaceAll('ç', 'c')
         .replaceAll(RegExp(r'\b(abrir|abre|abrindo|iniciar|inicia|rodar|executar|executa)\b'), '')
-        .replaceAll(RegExp(r'\b(o|a|app|aplicativo|programa)\b'), '')
+        .replaceAll(RegExp(r'\b(o|a|os|as|um|uma|app|aplicativo|programa)\b'), '')
         .replaceAll(RegExp(r'[^\w\s]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
@@ -115,9 +122,7 @@ class AppLauncherService {
   String _cleanWhatsAppPhone(String phone) {
     var value = phone.replaceAll(RegExp(r'\D'), '');
 
-    if (value.startsWith('00')) {
-      value = value.substring(2);
-    }
+    if (value.startsWith('00')) value = value.substring(2);
 
     while (value.startsWith('0') && value.length > 11) {
       value = value.substring(1);
@@ -160,9 +165,7 @@ class AppLauncherService {
     }
 
     final cleanPhone = _cleanWhatsAppPhone(phone);
-    if (!_isValidWhatsAppPhone(cleanPhone)) {
-      return false;
-    }
+    if (!_isValidWhatsAppPhone(cleanPhone)) return false;
 
     final encodedMessage = Uri.encodeComponent(text);
 
@@ -200,9 +203,6 @@ class AppLauncherService {
     );
   }
 
-
-
-
   Future<bool> hasWhatsAppNormal() async {
     return _isPackageInstalled('com.whatsapp');
   }
@@ -225,17 +225,13 @@ class AppLauncherService {
     final nativeOk = await _openNativeApp('com.whatsapp.w4b');
     if (nativeOk) return true;
 
-    // Evita usar whatsapp://send como fallback aqui, porque quando o WhatsApp normal
-    // também está instalado o Android pode abrir o app normal em vez do Business.
     return _openPlayStore('com.whatsapp.w4b');
   }
 
   Future<bool> _isPackageInstalled(String packageName) async {
     if (!Platform.isAndroid || packageName.trim().isEmpty) return false;
 
-    if (_installedApps.isEmpty) {
-      await loadApps();
-    }
+    if (_installedApps.isEmpty) await loadApps();
 
     for (final app in _installedApps) {
       final currentPackage = (app['package'] ?? '').toString();
@@ -244,7 +240,6 @@ class AppLauncherService {
 
     return false;
   }
-
 
   String _fixSpeechAppName(String text) {
     final normalized = _normalize(text);
@@ -257,7 +252,6 @@ class AppLauncherService {
         compact.contains('nubamk') ||
         compact.contains('nubamc') ||
         compact.contains('nubk') ||
-        compact.contains('nubak') ||
         compact.contains('nuba') ||
         compact.contains('nub')) {
       return 'nubank';
@@ -265,9 +259,7 @@ class AppLauncherService {
 
     if (compact.contains('tiktok') ||
         compact.contains('tictok') ||
-        compact.contains('tiktok') ||
         compact.contains('tktok') ||
-        compact.contains('tiktok') ||
         normalized.contains('tk tok') ||
         normalized.contains('tik tok') ||
         normalized.contains('tic tok')) {
@@ -306,13 +298,8 @@ class AppLauncherService {
       return 'instagram';
     }
 
-    if (compact.contains('telegram')) {
-      return 'telegram';
-    }
-
-    if (compact.contains('spotify')) {
-      return 'spotify';
-    }
+    if (compact.contains('telegram')) return 'telegram';
+    if (compact.contains('spotify')) return 'spotify';
 
     return normalized;
   }
@@ -349,9 +336,7 @@ class AppLauncherService {
     final normalized = _fixSpeechAppName(text);
     final compact = normalized.replaceAll(' ', '');
 
-    if (knownPackages.containsKey(normalized)) {
-      return normalized;
-    }
+    if (knownPackages.containsKey(normalized)) return normalized;
 
     for (final key in knownPackages.keys) {
       final normalizedKey = _normalize(key);
@@ -369,9 +354,7 @@ class AppLauncherService {
       final distance = _levenshtein(compact, compactKey);
       final allowedDistance = compact.length <= 5 ? 2 : 3;
 
-      if (distance <= allowedDistance) {
-        return key;
-      }
+      if (distance <= allowedDistance) return key;
     }
 
     return null;
@@ -435,11 +418,31 @@ class AppLauncherService {
       }
     }
 
-    if (bestScore >= 20) {
-      return bestMatch;
+    return bestScore >= 20 ? bestMatch : null;
+  }
+
+  Future<String?> findInstalledPackageByName(String name) async {
+    if (!Platform.isAndroid) return null;
+    if (_installedApps.isEmpty) await loadApps();
+
+    final fixedName = _fixSpeechAppName(name);
+    final known = _detectKnownApp(fixedName);
+
+    if (known != null) {
+      final pkg = knownPackages[known];
+      if (pkg != null && pkg.isNotEmpty) return pkg;
     }
 
-    return null;
+    final installed = _detectInstalledApp(fixedName);
+    final packageName = (installed?['package'] ?? '').toString().trim();
+
+    return packageName.isEmpty ? null : packageName;
+  }
+
+  Future<bool> openAnyInstalledApp(String name) async {
+    final packageName = await findInstalledPackageByName(name);
+    if (packageName == null || packageName.isEmpty) return false;
+    return _openNativeApp(packageName);
   }
 
   Future<bool> openKnownApp(String name) async {
@@ -483,20 +486,8 @@ class AppLauncherService {
       if (opened) return true;
     }
 
-    if (_installedApps.isEmpty) {
-      await loadApps();
-    }
-
-    final installedMatch = _detectInstalledApp(fixedName);
-
-    if (installedMatch != null) {
-      final packageName = (installedMatch['package'] ?? '').toString();
-
-      if (packageName.isNotEmpty) {
-        final opened = await _openNativeApp(packageName);
-        if (opened) return true;
-      }
-    }
+    final installedOpened = await openAnyInstalledApp(fixedName);
+    if (installedOpened) return true;
 
     if (detectedKnown != null) {
       final pkg = knownPackages[detectedKnown];
@@ -590,7 +581,6 @@ class AppLauncherService {
     }
   }
 
-
   bool isMediaAppName(String name) {
     final fixed = _fixSpeechAppName(name);
     final normalized = _normalize(fixed);
@@ -615,7 +605,6 @@ class AppLauncherService {
   }
 
   Future<bool> openMediaApp(String name) async {
-    if (!isMediaAppName(name)) return false;
     return openKnownApp(name);
   }
 
@@ -638,8 +627,12 @@ class AppLauncherService {
   }
 
   Future<bool> openCommunicationApp(String name) async {
-    if (!isCommunicationAppName(name)) return false;
     return openKnownApp(name);
+  }
+
+  Future<bool> canOpenAnyInstalledAppName(String name) async {
+    final packageName = await findInstalledPackageByName(name);
+    return packageName != null && packageName.isNotEmpty;
   }
 
   bool canOpenExternalAppName(String name) {
@@ -647,11 +640,6 @@ class AppLauncherService {
     final normalized = _normalize(fixed);
 
     if (normalized.isEmpty) return false;
-
-    // Comunicação continua no fluxo próprio para preservar áudio de mensagens.
-    if (isCommunicationAppName(normalized)) {
-      return false;
-    }
 
     if (knownPackages.containsKey(normalized)) return true;
 
@@ -663,8 +651,6 @@ class AppLauncherService {
   }
 
   Future<bool> openExternalApp(String name) async {
-    if (!canOpenExternalAppName(name)) return false;
     return openKnownApp(name);
   }
-
 }
