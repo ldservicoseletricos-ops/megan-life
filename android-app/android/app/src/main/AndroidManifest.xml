@@ -164,6 +164,19 @@
             android:exported="false"
             android:foregroundServiceType="microphone|dataSync"/>
 
+
+
+        <service
+            android:name=".MeganNotificationListenerService"
+            android:label="Megan Life - Leitura de notificações"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
+        </service>
+
         <service
             android:name=".MeganAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"

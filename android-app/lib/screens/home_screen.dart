@@ -43,6 +43,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const MethodChannel _presenceChannel = MethodChannel('megan.presence');
   static const MethodChannel _systemChannel = MethodChannel('megan.system');
   static const MethodChannel _wakeEventChannel = MethodChannel('megan.wake_event');
+  static const MethodChannel _whatsAppChannel = MethodChannel('megan.whatsapp');
 
   final _controller = TextEditingController();
   final _ai = AiService();
@@ -2650,6 +2651,182 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return double.tryParse(value.toString().replaceAll(',', '.')) ?? 0;
   }
 
+
+  bool _isReadWhatsAppMessagesCommand(String text) {
+    final command = _normalize(text);
+
+    return (command.contains('ler') ||
+            command.contains('leia') ||
+            command.contains('ouve') ||
+            command.contains('falar')) &&
+        (command.contains('mensagem') || command.contains('mensagens')) &&
+        (command.contains('whatsapp') || command.contains('zap') || command.contains('wpp'));
+  }
+
+  bool _isWhatsAppNotificationSettingsCommand(String text) {
+    final command = _normalize(text);
+
+    return command.contains('ativar leitura do whatsapp') ||
+        command.contains('permissao notificacao whatsapp') ||
+        command.contains('permissao de notificacao whatsapp') ||
+        command.contains('acesso notificacao whatsapp') ||
+        command.contains('acesso a notificacao whatsapp');
+  }
+
+  bool _isSendWhatsAppMessageCommand(String text) {
+    final command = _normalize(text);
+
+    return (command.contains('mandar') ||
+            command.contains('manda') ||
+            command.contains('enviar') ||
+            command.contains('envia')) &&
+        (command.contains('whatsapp') || command.contains('zap') || command.contains('wpp') || command.contains('mensagem'));
+  }
+
+  Future<bool> _tryHandleWhatsAppNotificationSettingsCommand(String text) async {
+    if (!_isWhatsAppNotificationSettingsCommand(text)) return false;
+
+    try {
+      final opened = await _whatsAppChannel.invokeMethod<bool>('openNotificationAccessSettings');
+      final answer = opened == true
+          ? 'Abrindo acesso a notificações. Ative Megan Life para eu conseguir ler mensagens recebidas do WhatsApp.'
+          : 'Não consegui abrir o acesso a notificações automaticamente.';
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    } catch (e) {
+      final answer = 'Erro ao abrir acesso a notificações: $e';
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    }
+  }
+
+  Future<bool> _tryReadLatestWhatsAppMessages(String text) async {
+    if (!_isReadWhatsAppMessagesCommand(text)) return false;
+
+    try {
+      final raw = await _whatsAppChannel.invokeMethod('getLatestMessages');
+      final items = raw is List
+          ? raw.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList()
+          : <Map<String, dynamic>>[];
+
+      if (items.isEmpty) {
+        const answer = 'Luiz, ainda não encontrei mensagens recentes do WhatsApp. Ative o acesso a notificações da Megan e aguarde chegar uma nova mensagem.';
+        _add(false, answer);
+        _rememberConversation(text.trim(), answer);
+        await _say(answer);
+        return true;
+      }
+
+      final limit = items.length > 3 ? 3 : items.length;
+      final parts = <String>[];
+
+      for (var i = 0; i < limit; i++) {
+        final item = items[i];
+        final sender = (item['sender'] ?? 'WhatsApp').toString().trim();
+        final message = (item['message'] ?? '').toString().trim();
+        final time = (item['time'] ?? '').toString().trim();
+
+        if (message.isEmpty) continue;
+        parts.add(time.isEmpty ? '$sender disse: $message' : '$sender, às $time, disse: $message');
+      }
+
+      final answer = parts.isEmpty
+          ? 'Luiz, recebi notificações do WhatsApp, mas não consegui ler o texto da mensagem.'
+          : 'Últimas mensagens do WhatsApp: ${parts.join('. ')}';
+
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    } catch (e) {
+      final answer = 'Não consegui ler as mensagens do WhatsApp agora: $e';
+      _add(false, answer);
+      _rememberConversation(text.trim(), answer);
+      await _say(answer);
+      return true;
+    }
+  }
+
+  String? _extractPhoneFromText(String text) {
+    final match = RegExp(r'(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?\d{4,5}[-\s]?\d{4}').firstMatch(text);
+    if (match == null) return null;
+
+    final digits = match.group(0)?.replaceAll(RegExp(r'\D'), '') ?? '';
+    if (digits.length < 10) return null;
+    return digits;
+  }
+
+  String _extractWhatsAppMessageText(String text) {
+    var value = text.trim();
+
+    final separators = [
+      RegExp(r'\b(?:dizendo|falando|com o texto|texto|mensagem)\b', caseSensitive: false),
+      RegExp(r'\b(?:que)\b', caseSensitive: false),
+    ];
+
+    for (final separator in separators) {
+      final match = separator.firstMatch(value);
+      if (match != null) {
+        value = value.substring(match.end).trim();
+        break;
+      }
+    }
+
+    value = value
+        .replaceAll(RegExp(r'^(mandar|manda|enviar|envia)\s+', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\b(whatsapp|zap|wpp)\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\b(para|pro|pra)\b\s*(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?\d{4,5}[-\s]?\d{4}', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    return value;
+  }
+
+  Future<bool> _trySendWhatsAppMessageCommand(String text) async {
+    if (!_isSendWhatsAppMessageCommand(text)) return false;
+
+    final clean = text.trim();
+    final phone = _extractPhoneFromText(clean);
+    final message = _extractWhatsAppMessageText(clean);
+    final normalized = _normalize(clean);
+    final preferBusiness = normalized.contains('business') ||
+        normalized.contains('comercial') ||
+        normalized.contains('empresa');
+
+    if (message.isEmpty || message.length < 2) {
+      const answer = 'Luiz, me diga o texto da mensagem. Exemplo: mandar WhatsApp para 11999999999 dizendo estou chegando.';
+      _add(false, answer);
+      _rememberConversation(clean, answer);
+      await _say(answer);
+      return true;
+    }
+
+    final opened = phone == null
+        ? await _apps.openWhatsAppWithText(message: message, preferBusiness: preferBusiness)
+        : await _apps.openWhatsAppChat(phone: phone, message: message, preferBusiness: preferBusiness);
+
+    final answer = opened
+        ? phone == null
+            ? 'Preparei a mensagem no WhatsApp, Luiz. Escolha o contato e confirme o envio na tela.'
+            : 'Preparei a mensagem no WhatsApp, Luiz. Confira e toque em enviar para confirmar.'
+        : 'Luiz, não consegui abrir o WhatsApp para preparar essa mensagem.';
+
+    _add(false, answer);
+    _rememberConversation(clean, answer);
+
+    if (opened) {
+      await _enterCommunicationMode(sourceCommand: clean);
+    } else {
+      await _say(answer);
+    }
+
+    return true;
+  }
+
   Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _loading) return;
@@ -2989,6 +3166,16 @@ Responda somente com o conteúdo que deve entrar no arquivo, sem explicar o proc
       // Entra antes dos agentes para não ser confundido com chat comum.
       final handledByFileGeneration = await _tryGenerateDownloadableFile(cleanText);
       if (handledByFileGeneration) return;
+
+      // 💬 WhatsApp — leitura de notificações e preparo seguro de mensagens.
+      final handledByWhatsAppSettings = await _tryHandleWhatsAppNotificationSettingsCommand(cleanText);
+      if (handledByWhatsAppSettings) return;
+
+      final handledByWhatsAppRead = await _tryReadLatestWhatsAppMessages(cleanText);
+      if (handledByWhatsAppRead) return;
+
+      final handledByWhatsAppSend = await _trySendWhatsAppMessageCommand(cleanText);
+      if (handledByWhatsAppSend) return;
 
       // ❤️ 6.6 — Saúde / Relógio / Health Connect.
       // Trata comandos naturais de saúde antes dos fluxos de apps para evitar

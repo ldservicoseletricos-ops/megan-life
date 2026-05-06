@@ -40,6 +40,7 @@ class MainActivity: FlutterActivity() {
     private val REMINDER_CHANNEL = "megan.reminders"
     private val ALARM_CHANNEL = "megan.alarm"
     private val WAKE_EVENT_CHANNEL = "megan.wake_event"
+    private val WHATSAPP_CHANNEL = "megan.whatsapp"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -358,6 +359,36 @@ class MainActivity: FlutterActivity() {
                 }
             }
 
+
+
+        // 💬 WHATSAPP / NOTIFICAÇÕES
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "getLatestMessages" -> {
+                            result.success(MeganNotificationListenerService.getLatestWhatsAppMessages())
+                        }
+
+                        "clearLatestMessages" -> {
+                            MeganNotificationListenerService.clearLatestWhatsAppMessages()
+                            result.success(true)
+                        }
+
+                        "openNotificationAccessSettings" -> {
+                            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        }
+
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    result.success(false)
+                }
+            }
 
 
         // 🎙️ EVENTO NATIVO DE WAKE WORD / OPÇÃO A

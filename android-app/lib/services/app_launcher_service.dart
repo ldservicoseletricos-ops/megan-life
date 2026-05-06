@@ -203,6 +203,17 @@ class AppLauncherService {
     );
   }
 
+
+  Future<bool> openWhatsAppWithText({
+    required String message,
+    bool preferBusiness = false,
+  }) async {
+    return openWhatsAppChat(
+      message: message,
+      preferBusiness: preferBusiness,
+    );
+  }
+
   Future<bool> hasWhatsAppNormal() async {
     return _isPackageInstalled('com.whatsapp');
   }
